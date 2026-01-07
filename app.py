@@ -5,6 +5,7 @@ import io
 import os
 import base64
 import gc
+import re  # <--- NOVO: Importante para validar o formato do processo
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -13,8 +14,8 @@ from selenium.webdriver.support import expected_conditions as EC
 
 # ================= CONFIGURAÇÃO DA PÁGINA =================
 st.set_page_config(
-    page_title="Sistema Integrado ANTT",
-    page_icon="🚛",
+    page_title="Sistema Integrado ANTT (Blindado)",
+    page_icon="🛡️",
     layout="wide"
 )
 
@@ -42,10 +43,9 @@ def download_automatico(df, nome_arquivo):
     except Exception: return False
 
 def normalizar_auto(valor):
-    """Limpa e padroniza o número do auto"""
     return str(valor).strip().upper().replace(' ', '')
 
-# ================= CLASSE DO ROBÔ =================
+# ================= CLASSE DE CONFIGURAÇÃO =================
 class ConfigWeb:
     def __init__(self):
         self.url_login = 'https://appweb1.antt.gov.br/sca/Site/Login.aspx?ReturnUrl=%2fspm%2fSite%2fDefesaCTB%2fConsultaProcessoSituacao.aspx'
@@ -54,10 +54,11 @@ class ConfigWeb:
         self.col_processo = 'Nº do Processo'
         self.col_status = 'Status Consulta'
         self.col_andamento = 'Último Andamento'
-        self.timeout_padrao = 25
-        self.sleep_pos_clique = 4 # Reduzi levemente, pois adicionei esperas inteligentes
-        self.reiniciar_a_cada = 30
+        self.timeout_padrao = 30 # Aumentado para lidar com lentidão
+        self.sleep_pos_clique = 5
+        self.reiniciar_a_cada = 20 # Reduzido para garantir memória fresca
 
+# ================= DRIVER =================
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new") 
@@ -65,10 +66,10 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disk-cache-size=1") 
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     return webdriver.Chrome(options=chrome_options)
 
+# ================= LOGIN =================
 def realizar_login(driver, usuario, senha, config):
     wait = WebDriverWait(driver, config.timeout_padrao)
     try:
@@ -76,6 +77,7 @@ def realizar_login(driver, usuario, senha, config):
             driver.get(config.url_login)
             time.sleep(3)
         
+        # Login Legado
         if "sca/Site/Login" in driver.current_url:
             try:
                 driver.find_element(By.XPATH, "//input[contains(@name, 'Usuario') or contains(@id, 'User')]").send_keys(usuario)
@@ -84,6 +86,7 @@ def realizar_login(driver, usuario, senha, config):
                 time.sleep(config.sleep_pos_clique)
             except: pass
 
+        # Login Gov.br
         if "sso.acesso.gov.br" in driver.current_url:
             try:
                 wait.until(EC.presence_of_element_located((By.ID, "accountId"))).send_keys(usuario)
@@ -96,22 +99,30 @@ def realizar_login(driver, usuario, senha, config):
 
         if "ConsultaProcessoSituacao" in driver.current_url: return True
         driver.get(config.url_consulta)
-        time.sleep(3)
+        time.sleep(4)
         if "ConsultaProcessoSituacao" in driver.current_url: return True
         return False
     except Exception: return False
 
+def garantir_sessao(driver, usuario, senha, config):
+    try:
+        if "consultaprocessosituacao" not in driver.current_url.lower() or "login" in driver.current_url.lower():
+            return realizar_login(driver, usuario, senha, config)
+        return True
+    except: return False
+
+# ================= CONSULTA BLINDADA (AQUI ESTÁ A MÁGICA) =================
 def consultar_auto(driver, auto, config):
     resultado = {'status': 'erro', 'dados': {}, 'mensagem': ''}
     wait = WebDriverWait(driver, config.timeout_padrao)
     
     try:
-        # 1. Garantir que está na tela de consulta
+        # 1. Navegação
         if "ConsultaProcessoSituacao" not in driver.current_url:
              driver.get(config.url_consulta)
              time.sleep(2)
         
-        # 2. Pesquisar Auto
+        # 2. Pesquisa
         try:
             campo = wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
             campo.clear()
@@ -120,30 +131,30 @@ def consultar_auto(driver, auto, config):
             driver.execute_script("arguments[0].click();", btn)
             time.sleep(config.sleep_pos_clique)
         except: 
-            return {'status': 'erro_conexao', 'dados': {}, 'mensagem': 'Erro ao Pesquisar'}
+            return {'status': 'erro_conexao', 'dados': {}, 'mensagem': 'Erro na Pesquisa (Site Lento)'}
         
-        # 3. Verificar resultados
+        # 3. Validação de Resultado
         src = driver.page_source.lower()
         if "nenhum registro" in src or "não encontrado" in src:
             resultado['status'] = 'nao_encontrado'
             resultado['mensagem'] = 'Auto não localizado'
             return resultado
 
-        # 4. Tentar abrir detalhes (Com Retry)
+        # 4. Abertura do Detalhe com Validação
         sucesso_abertura = False
         janela_principal = driver.window_handles[0]
         
-        for _ in range(3): # Tenta clicar 3 vezes
+        for tentativa in range(3): # Tenta 3 vezes
             try:
-                # Seletor genérico para pegar qualquer botão editar
-                btn_edit = driver.find_element(By.XPATH, "//input[contains(@src, 'img/editar.gif')] | //input[contains(@id, 'btnEditar')] | //a[contains(@title, 'Editar')]")
+                # Clica no botão editar
+                btn_edit = driver.find_element(By.XPATH, "//input[contains(@src, 'img/editar.gif')] | //input[contains(@id, 'btnEditar')]")
                 driver.execute_script("arguments[0].click();", btn_edit)
                 time.sleep(4)
                 
                 if len(driver.window_handles) > 1:
                     driver.switch_to.window(driver.window_handles[-1])
-                    # Espera crítica: Aguarda o campo PROCESSO aparecer
-                    wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(@id, 'txbProcesso')]")))
+                    # ESPERA ATIVA: Só prossegue se o campo processo aparecer E estiver visível
+                    wait.until(EC.visibility_of_element_located((By.XPATH, "//input[contains(@id, 'txbProcesso')]")))
                     sucesso_abertura = True
                     break
                 else:
@@ -151,59 +162,65 @@ def consultar_auto(driver, auto, config):
             except: 
                 time.sleep(2)
         
-        # 5. Extração de Dados (AQUI ESTAVA O PROBLEMA)
+        # 5. Extração e Validação RIGOROSA
         if sucesso_abertura:
             dados = {}
             try:
-                # Busca Inteligente: Procura o input que termina com 'txbProcesso', não importa o início do ID
+                # Regex para validar processo (Formato: 5050X.XXXXXX/XXXX-XX)
+                padrao_processo = re.compile(r'\d{5}\.\d{6}/\d{4}-\d{2}')
+                
                 elem_proc = driver.find_element(By.XPATH, "//input[contains(@id, 'txbProcesso')]")
-                val_proc = elem_proc.get_attribute('value')
+                val_proc = elem_proc.get_attribute('value').strip()
                 
-                # VALIDAÇÃO CRÍTICA: Se achou o campo mas veio vazio, espera mais um pouco
-                if not val_proc:
-                    time.sleep(2)
-                    val_proc = elem_proc.get_attribute('value')
+                # Loop de insistência: Se estiver vazio, espera e tenta de novo
+                for _ in range(5):
+                    if not val_proc:
+                        time.sleep(1.5)
+                        val_proc = elem_proc.get_attribute('value').strip()
+                    else:
+                        break
                 
-                dados['processo'] = val_proc
+                # Validação Final: É um processo válido?
+                if padrao_processo.search(val_proc):
+                    dados['processo'] = val_proc
+                elif val_proc:
+                     dados['processo'] = f"{val_proc} (Formato Inválido?)" # Avisa se veio algo estranho
+                else:
+                     raise ValueError("Campo Processo veio vazio")
 
-                # Busca Tabela de Andamentos
+                # Extração de Andamento
                 try:
-                    # Pega a tabela de conteúdo
                     trs = driver.find_elements(By.XPATH, "//table[contains(@class, 'tabela-conteudo')]//tr")
-                    # Pega a última linha que tenha dados (ignora cabeçalho)
                     if len(trs) > 1:
-                        # Pega a segunda coluna (índice 1) que geralmente é a Descrição
                         dados['ultimo_andamento'] = trs[-1].find_elements(By.TAG_NAME, "td")[1].text
                     else: 
                         dados['ultimo_andamento'] = "Sem histórico"
                 except: 
                     dados['ultimo_andamento'] = "-"
                 
-                # Validação Final de Sucesso
-                if dados.get('processo'):
-                    resultado['dados'] = dados
-                    resultado['status'] = 'sucesso'
-                    resultado['mensagem'] = 'Sucesso'
-                else:
-                    resultado['status'] = 'erro_leitura'
-                    resultado['mensagem'] = 'Abriu mas dados vazios'
+                resultado['dados'] = dados
+                resultado['status'] = 'sucesso'
+                resultado['mensagem'] = 'Sucesso'
 
             except Exception as e: 
+                # Se der erro, tira PRINT para debug
+                try: driver.save_screenshot(f"erro_{auto}.png") 
+                except: pass
+                
                 resultado['status'] = 'erro_leitura'
-                resultado['mensagem'] = f"Erro Extração: {str(e)[:10]}"
+                resultado['mensagem'] = f"Erro Validação: {str(e)[:20]}"
 
-            # Fecha janela e volta
+            # Fecha e volta
             if len(driver.window_handles) > 1:
                 driver.close()
                 driver.switch_to.window(janela_principal)
         else:
             resultado['status'] = 'erro_interacao'
-            resultado['mensagem'] = 'Não abriu detalhes'
+            resultado['mensagem'] = 'Pop-up não abriu'
 
     except Exception as e: 
-        resultado['mensagem'] = f"Erro Geral: {str(e)[:15]}"
+        resultado['mensagem'] = f"Crash: {str(e)[:15]}"
         try:
-            # Tenta voltar a janela principal em caso de erro fatal
             if len(driver.window_handles) > 1:
                 driver.close()
                 driver.switch_to.window(driver.window_handles[0])
@@ -219,9 +236,8 @@ with col_logo:
 
 with col_title:
     st.markdown("<h1 style='margin-top: -10px;'>Sistema Integrado ANTT</h1>", unsafe_allow_html=True)
-    st.caption("Automação de Consultas e Gestão de Planilhas (Versão Verificada)")
+    st.caption("Versão Blindada com Validação de Dados")
 
-# ABAS DO SISTEMA
 tab_robo, tab_comparador = st.tabs(["🤖 Robô de Consulta", "⚖️ Comparador de Planilhas"])
 
 # ================= ABA 1: ROBÔ =================
@@ -238,17 +254,16 @@ with tab_robo:
         remover_duplicados = st.checkbox("Remover duplicados", value=True)
         limitador = st.number_input("Limite (0=Tudo)", min_value=0, value=0)
 
-    st.info("O robô agora valida se os dados foram realmente lidos antes de confirmar o sucesso.")
-    uploaded_file = st.file_uploader("📂 Planilha de Entrada (.xlsx)", type=['xlsx'], key="upload_robo")
+    st.info("O robô agora valida se o nº do processo parece real (ex: 50500...).")
+    uploaded_file = st.file_uploader("📂 Planilha de Entrada (.xlsx)", type=['xlsx'], key="up_robo")
 
-    if uploaded_file and st.button("▶️ Iniciar Robô"):
+    if uploaded_file and st.button("▶️ Iniciar Robô Blindado"):
         if not cpf_input or not senha_input:
-            st.error("⚠️ Preencha o Login na barra lateral!")
+            st.error("⚠️ Preencha o Login!")
         else:
             config = ConfigWeb()
             df = pd.read_excel(uploaded_file)
             
-            # Limpeza Inicial
             for col in [config.col_processo, config.col_status, config.col_andamento, config.col_auto]:
                  if col in df.columns: df[col] = df[col].astype(str).replace('nan', '')
                  else: df[col] = ""
@@ -256,7 +271,7 @@ with tab_robo:
             if remover_duplicados: df = df.drop_duplicates(subset=[config.col_auto], keep='first')
             if limitador > 0: df = df.head(limitador)
 
-            status_box = st.status("Inicializando...", expanded=True)
+            status_box = st.status("Iniciando...", expanded=True)
             progress_bar = st.progress(0)
             log_placeholder = st.empty()
             
@@ -277,7 +292,7 @@ with tab_robo:
                     for index, row in df.iterrows():
                         contador_lote += 1
                         if contador_lote >= config.reiniciar_a_cada:
-                            status_box.write("🧹 Limpando memória RAM...")
+                            status_box.write("🧹 Limpeza preventiva de memória...")
                             driver.quit()
                             gc.collect()
                             time.sleep(2)
@@ -288,8 +303,11 @@ with tab_robo:
                         auto = normalizar_auto(row[config.col_auto])
                         status_atual = str(row[config.col_status])
                         
-                        if pular_feitos and ("Sucesso" in status_atual or "Processo" in status_atual) and len(str(row[config.col_processo])) > 5:
-                            st.session_state.logs.insert(0, f"⏭️ {index+1}/{total}: {auto} (Já preenchido)")
+                        # Verifica se já tem PROCESSO preenchido (não apenas status sucesso)
+                        tem_processo = len(str(row[config.col_processo])) > 5
+                        
+                        if pular_feitos and tem_processo:
+                            st.session_state.logs.insert(0, f"⏭️ {index+1}/{total}: {auto} (Já tem processo)")
                             log_placeholder.text("\n".join(st.session_state.logs[:10]))
                             progress_bar.progress((index + 1) / total)
                             continue
@@ -299,19 +317,19 @@ with tab_robo:
                             st.session_state.logs.insert(0, f"♻️ {index+1}/{total}: {auto} (Cache)")
                         else:
                             status_box.update(label=f"🔄 [{index+1}/{total}] Consultando: {auto}")
+                            
+                            if not garantir_sessao(driver, cpf_input, senha_input, config):
+                                st.session_state.logs.insert(0, f"⛔ {index+1}/{total}: Sessão caiu")
+                                continue
+                                
                             res = consultar_auto(driver, auto, config)
                             cache[auto] = res
                         
-                        # ATUALIZAÇÃO SEGURA
                         df.at[index, config.col_status] = res['mensagem']
                         if res['status'] == 'sucesso':
-                            if res['dados'].get('processo'): # Só atualiza se tiver dados
-                                df.at[index, config.col_processo] = res['dados'].get('processo', '')
-                                df.at[index, config.col_andamento] = res['dados'].get('ultimo_andamento', '')
-                                icon = "✅"
-                            else:
-                                df.at[index, config.col_status] = "Dados em branco"
-                                icon = "⚠️"
+                            df.at[index, config.col_processo] = res['dados'].get('processo', '')
+                            df.at[index, config.col_andamento] = res['dados'].get('ultimo_andamento', '')
+                            icon = "✅"
                         elif res['status'] == 'nao_encontrado': icon = "⚠️"
                         else: icon = "❌"
                         

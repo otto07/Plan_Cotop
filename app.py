@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import io
 import os
+import base64
 import random
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -11,7 +12,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # ================= CONFIGURAÇÃO DA PÁGINA =================
-st.set_page_config(page_title="Robô ANTT - Download Garantido", layout="wide")
+st.set_page_config(
+    page_title="Atualizador de Planilha Controle",
+    page_icon="🚛",
+    layout="wide"
+)
 
 # ================= CLASSE DE CONFIGURAÇÃO =================
 class ConfigWeb:
@@ -24,6 +29,30 @@ class ConfigWeb:
         self.col_andamento = 'Último Andamento'
         self.timeout_padrao = 30 
         self.sleep_pos_clique = 6 
+
+# ================= FUNÇÃO DE DOWNLOAD AUTOMÁTICO =================
+def download_automatico(df):
+    try:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        val = buffer.getvalue()
+        b64 = base64.b64encode(val).decode()
+        
+        md = f"""
+        <script>
+            var link = document.createElement('a');
+            link.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}';
+            link.download = 'Planilha_Atualizada_ANTT.xlsx';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        </script>
+        """
+        st.components.v1.html(md, height=0)
+        return True
+    except Exception as e:
+        return False
 
 # ================= DRIVER =================
 def get_driver():
@@ -149,32 +178,40 @@ def consultar_auto(driver, auto, config):
     return resultado
 
 # ================= INTERFACE =================
-st.title("🐢 Robô ANTT - Download Garantido")
+# Cabeçalho Oficial
+col_logo, col_title = st.columns([1, 5])
+with col_logo:
+    # URL pública do logo da ANTT (Wikimedia Commons)
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Logo_ANTT.svg/1280px-Logo_ANTT.svg.png", width=120)
+with col_title:
+    st.title("Atualizador de Planilha Controle")
+    st.markdown("Sistema automatizado de consulta e atualização de processos.")
 
-# Inicialização da Memória (Session State)
+st.divider()
+
 if 'df_final' not in st.session_state:
     st.session_state.df_final = None
 
 with st.sidebar:
-    st.header("🔐 Acesso")
+    st.header("🔐 Credenciais de Acesso")
     cpf_input = st.text_input("Usuário/CPF")
     senha_input = st.text_input("Senha", type="password")
+    
     st.divider()
-    pular_feitos = st.checkbox("⏩ Pular já realizados", value=True)
-    remover_duplicados = st.checkbox("🧹 Remover duplicados", value=True)
-    limitador = st.number_input("Limite (0 = Tudo)", min_value=0, value=0)
+    st.subheader("⚙️ Configurações")
+    pular_feitos = st.checkbox("Pular registros já concluídos", value=True)
+    remover_duplicados = st.checkbox("Remover autos duplicados", value=True)
+    limitador = st.number_input("Limite de linhas (0 = Tudo)", min_value=0, value=0)
 
-uploaded_file = st.file_uploader("Planilha (entrada.xlsx)", type=['xlsx'])
+uploaded_file = st.file_uploader("📂 Carregar Planilha de Entrada (.xlsx)", type=['xlsx'])
 
-# Botão de Início
-if uploaded_file and st.button("🚀 Iniciar Processamento"):
+if uploaded_file and st.button("▶️ Iniciar Atualização"):
     if not cpf_input or not senha_input:
-        st.error("Preencha o login!")
+        st.error("⚠️ Por favor, preencha as credenciais de acesso.")
     else:
         config = ConfigWeb()
         df = pd.read_excel(uploaded_file)
         
-        # Prepara colunas
         for col in [config.col_processo, config.col_status, config.col_andamento, config.col_auto]:
              if col in df.columns: df[col] = df[col].astype(str).replace('nan', '')
              else: df[col] = ""
@@ -182,9 +219,9 @@ if uploaded_file and st.button("🚀 Iniciar Processamento"):
         if remover_duplicados: df = df.drop_duplicates(subset=[config.col_auto], keep='first')
         if limitador > 0: df = df.head(limitador)
 
-        status_box = st.status("Iniciando navegador...", expanded=True)
+        status_box = st.status("Inicializando sistema...", expanded=True)
         progress_bar = st.progress(0)
-        with st.expander("Logs em Tempo Real", expanded=True):
+        with st.expander("📜 Log de Execução", expanded=True):
             log_container = st.empty()
             
         logs = []
@@ -192,12 +229,12 @@ if uploaded_file and st.button("🚀 Iniciar Processamento"):
         driver = get_driver()
         
         try:
-            status_box.write("🔐 Realizando login...")
+            status_box.write("🔐 Autenticando no sistema ANTT...")
             if not realizar_login(driver, cpf_input, senha_input, config):
-                st.error("Falha no login inicial.")
-                status_box.update(label="Erro Login", state="error")
+                st.error("❌ Falha na autenticação. Verifique usuário e senha.")
+                status_box.update(label="Erro de Login", state="error")
             else:
-                status_box.write("Login OK. Iniciando...")
+                status_box.write("✅ Autenticado. Iniciando varredura...")
                 total = len(df)
                 df = df.reset_index(drop=True)
 
@@ -206,21 +243,21 @@ if uploaded_file and st.button("🚀 Iniciar Processamento"):
                     status_atual = str(row[config.col_status])
                     
                     if pular_feitos and ("Sucesso" in status_atual or "Processo" in status_atual):
-                        logs.insert(0, f"⏭️ [{index+1}] {auto}: Pronto")
+                        logs.insert(0, f"⏭️ [{index+1}/{total}] {auto}: Já processado anteriormente")
                         log_container.text("\n".join(logs[:15]))
                         progress_bar.progress((index + 1) / total)
                         continue
 
                     if auto in cache_consultas:
                         res = cache_consultas[auto]
-                        logs.insert(0, f"♻️ [{index+1}] {auto}: Cache")
+                        logs.insert(0, f"♻️ [{index+1}/{total}] {auto}: Recuperado do cache")
                     else:
-                        status_box.update(label=f"[{index+1}/{total}] {auto} (Verificando sessão...)")
+                        status_box.update(label=f"🔄 Processando {index+1}/{total}: {auto} (Verificando sessão...)")
                         if not garantir_sessao(driver, cpf_input, senha_input, config):
-                            logs.insert(0, f"⛔ [{index+1}] {auto}: Sessão caiu")
+                            logs.insert(0, f"⛔ [{index+1}/{total}] {auto}: Sessão expirou e não renovou")
                             continue 
                         
-                        status_box.update(label=f"[{index+1}/{total}] Consultando {auto}...")
+                        status_box.update(label=f"🔎 Consultando {index+1}/{total}: {auto}...")
                         res = consultar_auto(driver, auto, config)
                         cache_consultas[auto] = res
                     
@@ -232,33 +269,35 @@ if uploaded_file and st.button("🚀 Iniciar Processamento"):
                     elif res['status'] == 'nao_encontrado': icon = "⚠️"
                     else: icon = "❌"
                     
-                    logs.insert(0, f"{icon} [{index+1}] {auto}: {res['mensagem']}")
+                    logs.insert(0, f"{icon} [{index+1}/{total}] {auto}: {res['mensagem']}")
                     log_container.text("\n".join(logs[:15]))
                     progress_bar.progress((index + 1) / total)
 
-                status_box.update(label="Processamento Concluído!", state="complete")
+                status_box.update(label="Processamento Concluído! Iniciando download...", state="complete")
                 
-                # SALVA NO SESSION STATE PARA NÃO PERDER
                 st.session_state.df_final = df
-                st.success("Processamento finalizado! O download está disponível abaixo.")
+                st.success("Processamento finalizado com sucesso!")
+                
+                # Download Automático
+                download_automatico(df)
 
         except Exception as e:
             st.error(f"Erro Crítico: {e}")
         finally:
             driver.quit()
 
-# ================= ÁREA DE DOWNLOAD (FORA DO BOTÃO INICIAR) =================
+# ================= ÁREA DE DOWNLOAD MANUAL =================
 if st.session_state.df_final is not None:
     st.divider()
-    st.subheader("📥 Download do Resultado")
+    st.info("Caso o download não tenha iniciado, clique abaixo:")
     
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         st.session_state.df_final.to_excel(writer, index=False)
     
     st.download_button(
-        label="Clique aqui para Baixar a Planilha Atualizada",
+        label="📥 Baixar Planilha Atualizada",
         data=buffer.getvalue(),
-        file_name="antt_resultado_final.xlsx",
+        file_name="Planilha_Atualizada_ANTT.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )

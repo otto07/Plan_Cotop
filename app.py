@@ -178,14 +178,21 @@ def consultar_auto(driver, auto, config):
     return resultado
 
 # ================= INTERFACE =================
-# Cabeçalho Oficial
-col_logo, col_title = st.columns([1, 5])
+
+# Layout do Cabeçalho (Logo + Título)
+col_logo, col_title = st.columns([1, 6]) # Ajustei a proporção para o título ficar mais perto
+
 with col_logo:
-    # URL pública do logo da ANTT (Wikimedia Commons)
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/Logo_ANTT.svg/1280px-Logo_ANTT.svg.png", width=120)
+    # 1. Tenta carregar imagem local (se você subiu no GitHub)
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=100)
+    # 2. Se não existir, tenta URL alternativa da internet (SVG costuma ser mais estável)
+    else:
+        st.image("https://upload.wikimedia.org/wikipedia/commons/5/52/Logo_ANTT.svg", width=100)
+
 with col_title:
-    st.title("Atualizador de Planilha Controle")
-    st.markdown("Sistema automatizado de consulta e atualização de processos.")
+    st.markdown("<h1 style='margin-top: -10px;'>Atualizador de Planilha Controle</h1>", unsafe_allow_html=True)
+    st.caption("Sistema automatizado de consulta e atualização de processos.")
 
 st.divider()
 
@@ -278,7 +285,6 @@ if uploaded_file and st.button("▶️ Iniciar Atualização"):
                 st.session_state.df_final = df
                 st.success("Processamento finalizado com sucesso!")
                 
-                # Download Automático
                 download_automatico(df)
 
         except Exception as e:

@@ -5,7 +5,7 @@ import io
 import os
 import base64
 import gc
-import re  # <--- NOVO: Importante para validar o formato do processo
+import re
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -14,8 +14,8 @@ from selenium.webdriver.support import expected_conditions as EC
 
 # ================= CONFIGURAÇÃO DA PÁGINA =================
 st.set_page_config(
-    page_title="Sistema Integrado ANTT (Blindado)",
-    page_icon="🛡️",
+    page_title="Sistema Integrado ANTT (Final)",
+    page_icon="🚛",
     layout="wide"
 )
 
@@ -54,9 +54,9 @@ class ConfigWeb:
         self.col_processo = 'Nº do Processo'
         self.col_status = 'Status Consulta'
         self.col_andamento = 'Último Andamento'
-        self.timeout_padrao = 30 # Aumentado para lidar com lentidão
+        self.timeout_padrao = 30 
         self.sleep_pos_clique = 5
-        self.reiniciar_a_cada = 20 # Reduzido para garantir memória fresca
+        self.reiniciar_a_cada = 25 
 
 # ================= DRIVER =================
 def get_driver():
@@ -66,6 +66,7 @@ def get_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disk-cache-size=1") 
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     return webdriver.Chrome(options=chrome_options)
 
@@ -111,7 +112,7 @@ def garantir_sessao(driver, usuario, senha, config):
         return True
     except: return False
 
-# ================= CONSULTA BLINDADA (AQUI ESTÁ A MÁGICA) =================
+# ================= CONSULTA =================
 def consultar_auto(driver, auto, config):
     resultado = {'status': 'erro', 'dados': {}, 'mensagem': ''}
     wait = WebDriverWait(driver, config.timeout_padrao)
@@ -140,20 +141,20 @@ def consultar_auto(driver, auto, config):
             resultado['mensagem'] = 'Auto não localizado'
             return resultado
 
-        # 4. Abertura do Detalhe com Validação
+        # 4. Abertura do Detalhe
         sucesso_abertura = False
         janela_principal = driver.window_handles[0]
         
-        for tentativa in range(3): # Tenta 3 vezes
+        for tentativa in range(3): 
             try:
                 # Clica no botão editar
-                btn_edit = driver.find_element(By.XPATH, "//input[contains(@src, 'img/editar.gif')] | //input[contains(@id, 'btnEditar')]")
+                btn_edit = driver.find_element(By.XPATH, "//input[contains(@src, 'img/editar.gif')] | //input[contains(@id, 'btnEditar')] | //a[contains(@title, 'Editar')]")
                 driver.execute_script("arguments[0].click();", btn_edit)
                 time.sleep(4)
                 
                 if len(driver.window_handles) > 1:
                     driver.switch_to.window(driver.window_handles[-1])
-                    # ESPERA ATIVA: Só prossegue se o campo processo aparecer E estiver visível
+                    # Espera o campo de processo estar VISÍVEL
                     wait.until(EC.visibility_of_element_located((By.XPATH, "//input[contains(@id, 'txbProcesso')]")))
                     sucesso_abertura = True
                     break
@@ -162,17 +163,17 @@ def consultar_auto(driver, auto, config):
             except: 
                 time.sleep(2)
         
-        # 5. Extração e Validação RIGOROSA
+        # 5. Extração e Validação
         if sucesso_abertura:
             dados = {}
             try:
-                # Regex para validar processo (Formato: 5050X.XXXXXX/XXXX-XX)
+                # Regex para validar processo
                 padrao_processo = re.compile(r'\d{5}\.\d{6}/\d{4}-\d{2}')
                 
                 elem_proc = driver.find_element(By.XPATH, "//input[contains(@id, 'txbProcesso')]")
                 val_proc = elem_proc.get_attribute('value').strip()
                 
-                # Loop de insistência: Se estiver vazio, espera e tenta de novo
+                # Loop de insistência para campo vazio
                 for _ in range(5):
                     if not val_proc:
                         time.sleep(1.5)
@@ -180,13 +181,13 @@ def consultar_auto(driver, auto, config):
                     else:
                         break
                 
-                # Validação Final: É um processo válido?
+                # Validação Lógica
                 if padrao_processo.search(val_proc):
                     dados['processo'] = val_proc
                 elif val_proc:
-                     dados['processo'] = f"{val_proc} (Formato Inválido?)" # Avisa se veio algo estranho
+                     dados['processo'] = f"{val_proc} (Formato Inválido?)" 
                 else:
-                     raise ValueError("Campo Processo veio vazio")
+                     raise ValueError("Campo Processo vazio")
 
                 # Extração de Andamento
                 try:
@@ -203,10 +204,6 @@ def consultar_auto(driver, auto, config):
                 resultado['mensagem'] = 'Sucesso'
 
             except Exception as e: 
-                # Se der erro, tira PRINT para debug
-                try: driver.save_screenshot(f"erro_{auto}.png") 
-                except: pass
-                
                 resultado['status'] = 'erro_leitura'
                 resultado['mensagem'] = f"Erro Validação: {str(e)[:20]}"
 
@@ -216,7 +213,7 @@ def consultar_auto(driver, auto, config):
                 driver.switch_to.window(janela_principal)
         else:
             resultado['status'] = 'erro_interacao'
-            resultado['mensagem'] = 'Pop-up não abriu'
+            resultado['mensagem'] = 'Detalhe não abriu'
 
     except Exception as e: 
         resultado['mensagem'] = f"Crash: {str(e)[:15]}"
@@ -236,7 +233,7 @@ with col_logo:
 
 with col_title:
     st.markdown("<h1 style='margin-top: -10px;'>Sistema Integrado ANTT</h1>", unsafe_allow_html=True)
-    st.caption("Versão Blindada com Validação de Dados")
+    st.caption("Versão Final com Lógica de Atualização Corrigida")
 
 tab_robo, tab_comparador = st.tabs(["🤖 Robô de Consulta", "⚖️ Comparador de Planilhas"])
 
@@ -254,10 +251,10 @@ with tab_robo:
         remover_duplicados = st.checkbox("Remover duplicados", value=True)
         limitador = st.number_input("Limite (0=Tudo)", min_value=0, value=0)
 
-    st.info("O robô agora valida se o nº do processo parece real (ex: 50500...).")
+    st.info("Dica: Desmarque 'Pular já concluídos' se quiser forçar a atualização de processos existentes.")
     uploaded_file = st.file_uploader("📂 Planilha de Entrada (.xlsx)", type=['xlsx'], key="up_robo")
 
-    if uploaded_file and st.button("▶️ Iniciar Robô Blindado"):
+    if uploaded_file and st.button("▶️ Iniciar Robô"):
         if not cpf_input or not senha_input:
             st.error("⚠️ Preencha o Login!")
         else:
@@ -303,11 +300,16 @@ with tab_robo:
                         auto = normalizar_auto(row[config.col_auto])
                         status_atual = str(row[config.col_status])
                         
-                        # Verifica se já tem PROCESSO preenchido (não apenas status sucesso)
+                        # === LÓGICA CORRIGIDA ===
+                        # Só pula se estiver marcado como SUCESSO na coluna status
+                        # Ignora se tem processo preenchido ou não (pois pode querer atualizar)
+                        ja_realizado = "Sucesso" in status_atual
                         tem_processo = len(str(row[config.col_processo])) > 5
                         
-                        if pular_feitos and tem_processo:
-                            st.session_state.logs.insert(0, f"⏭️ {index+1}/{total}: {auto} (Já tem processo)")
+                        # A condição agora exige que o STATUS seja sucesso para pular.
+                        # Se tiver processo mas status estiver vazio ou erro, ele consulta.
+                        if pular_feitos and ja_realizado and tem_processo:
+                            st.session_state.logs.insert(0, f"⏭️ {index+1}/{total}: {auto} (Concluído)")
                             log_placeholder.text("\n".join(st.session_state.logs[:10]))
                             progress_bar.progress((index + 1) / total)
                             continue
@@ -369,6 +371,7 @@ with tab_comparador:
                 df_geaut = pd.read_excel(file_geaut)
                 df_entrada = pd.read_excel(file_entrada)
                 
+                # Tenta achar colunas automaticamente
                 col_auto_geaut = next((c for c in df_geaut.columns if "Auto" in c and "Infração" in c), None)
                 col_auto_entrada = next((c for c in df_entrada.columns if "Auto" in c and "Infração" in c), None)
 

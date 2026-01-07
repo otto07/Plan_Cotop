@@ -55,7 +55,7 @@ class ConfigWeb:
         self.col_status = 'Status Consulta'
         self.col_andamento = 'Último Andamento'
         self.timeout_padrao = 25
-        self.sleep_pos_clique = 5
+        self.sleep_pos_clique = 4 # Reduzi levemente, pois adicionei esperas inteligentes
         self.reiniciar_a_cada = 30
 
 def get_driver():
@@ -74,7 +74,7 @@ def realizar_login(driver, usuario, senha, config):
     try:
         if "ConsultaProcessoSituacao" not in driver.current_url:
             driver.get(config.url_login)
-            time.sleep(4)
+            time.sleep(3)
         
         if "sca/Site/Login" in driver.current_url:
             try:
@@ -88,15 +88,15 @@ def realizar_login(driver, usuario, senha, config):
             try:
                 wait.until(EC.presence_of_element_located((By.ID, "accountId"))).send_keys(usuario)
                 driver.find_element(By.XPATH, "//button[contains(text(), 'Continuar')]").click()
-                time.sleep(4)
+                time.sleep(3)
                 wait.until(EC.presence_of_element_located((By.ID, "password"))).send_keys(senha)
                 driver.find_element(By.ID, "submit-button").click()
-                time.sleep(6) 
+                time.sleep(5) 
             except: pass
 
         if "ConsultaProcessoSituacao" in driver.current_url: return True
         driver.get(config.url_consulta)
-        time.sleep(4)
+        time.sleep(3)
         if "ConsultaProcessoSituacao" in driver.current_url: return True
         return False
     except Exception: return False
@@ -104,10 +104,14 @@ def realizar_login(driver, usuario, senha, config):
 def consultar_auto(driver, auto, config):
     resultado = {'status': 'erro', 'dados': {}, 'mensagem': ''}
     wait = WebDriverWait(driver, config.timeout_padrao)
+    
     try:
+        # 1. Garantir que está na tela de consulta
         if "ConsultaProcessoSituacao" not in driver.current_url:
              driver.get(config.url_consulta)
              time.sleep(2)
+        
+        # 2. Pesquisar Auto
         try:
             campo = wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
             campo.clear()
@@ -115,48 +119,96 @@ def consultar_auto(driver, auto, config):
             btn = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar")
             driver.execute_script("arguments[0].click();", btn)
             time.sleep(config.sleep_pos_clique)
-        except: return {'status': 'erro_conexao', 'dados': {}, 'mensagem': 'Timeout pesquisa'}
+        except: 
+            return {'status': 'erro_conexao', 'dados': {}, 'mensagem': 'Erro ao Pesquisar'}
         
+        # 3. Verificar resultados
         src = driver.page_source.lower()
         if "nenhum registro" in src or "não encontrado" in src:
             resultado['status'] = 'nao_encontrado'
             resultado['mensagem'] = 'Auto não localizado'
             return resultado
 
-        sucesso = False
-        for _ in range(3):
+        # 4. Tentar abrir detalhes (Com Retry)
+        sucesso_abertura = False
+        janela_principal = driver.window_handles[0]
+        
+        for _ in range(3): # Tenta clicar 3 vezes
             try:
-                btn_edit = driver.find_element(By.XPATH, "//input[contains(@id, 'btnEditar')] | //a[contains(@title, 'Editar')]")
+                # Seletor genérico para pegar qualquer botão editar
+                btn_edit = driver.find_element(By.XPATH, "//input[contains(@src, 'img/editar.gif')] | //input[contains(@id, 'btnEditar')] | //a[contains(@title, 'Editar')]")
                 driver.execute_script("arguments[0].click();", btn_edit)
-                time.sleep(config.sleep_pos_clique)
+                time.sleep(4)
+                
                 if len(driver.window_handles) > 1:
                     driver.switch_to.window(driver.window_handles[-1])
+                    # Espera crítica: Aguarda o campo PROCESSO aparecer
                     wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(@id, 'txbProcesso')]")))
-                    sucesso = True
+                    sucesso_abertura = True
                     break
+                else:
+                    time.sleep(2)
+            except: 
                 time.sleep(2)
-            except: time.sleep(2)
         
-        if sucesso:
+        # 5. Extração de Dados (AQUI ESTAVA O PROBLEMA)
+        if sucesso_abertura:
             dados = {}
             try:
-                dados['processo'] = driver.find_element(By.XPATH, "//*[contains(@id, 'txbProcesso')]").get_attribute('value')
+                # Busca Inteligente: Procura o input que termina com 'txbProcesso', não importa o início do ID
+                elem_proc = driver.find_element(By.XPATH, "//input[contains(@id, 'txbProcesso')]")
+                val_proc = elem_proc.get_attribute('value')
+                
+                # VALIDAÇÃO CRÍTICA: Se achou o campo mas veio vazio, espera mais um pouco
+                if not val_proc:
+                    time.sleep(2)
+                    val_proc = elem_proc.get_attribute('value')
+                
+                dados['processo'] = val_proc
+
+                # Busca Tabela de Andamentos
                 try:
+                    # Pega a tabela de conteúdo
                     trs = driver.find_elements(By.XPATH, "//table[contains(@class, 'tabela-conteudo')]//tr")
-                    if len(trs) > 1: dados['ultimo_andamento'] = trs[-1].find_elements(By.TAG_NAME, "td")[1].text
-                    else: dados['ultimo_andamento'] = "Sem histórico"
-                except: dados['ultimo_andamento'] = "-"
-            except: dados['processo'] = "Erro leitura"
-            resultado['dados'] = dados
-            resultado['status'] = 'sucesso'
-            resultado['mensagem'] = 'Sucesso'
+                    # Pega a última linha que tenha dados (ignora cabeçalho)
+                    if len(trs) > 1:
+                        # Pega a segunda coluna (índice 1) que geralmente é a Descrição
+                        dados['ultimo_andamento'] = trs[-1].find_elements(By.TAG_NAME, "td")[1].text
+                    else: 
+                        dados['ultimo_andamento'] = "Sem histórico"
+                except: 
+                    dados['ultimo_andamento'] = "-"
+                
+                # Validação Final de Sucesso
+                if dados.get('processo'):
+                    resultado['dados'] = dados
+                    resultado['status'] = 'sucesso'
+                    resultado['mensagem'] = 'Sucesso'
+                else:
+                    resultado['status'] = 'erro_leitura'
+                    resultado['mensagem'] = 'Abriu mas dados vazios'
+
+            except Exception as e: 
+                resultado['status'] = 'erro_leitura'
+                resultado['mensagem'] = f"Erro Extração: {str(e)[:10]}"
+
+            # Fecha janela e volta
+            if len(driver.window_handles) > 1:
+                driver.close()
+                driver.switch_to.window(janela_principal)
+        else:
+            resultado['status'] = 'erro_interacao'
+            resultado['mensagem'] = 'Não abriu detalhes'
+
+    except Exception as e: 
+        resultado['mensagem'] = f"Erro Geral: {str(e)[:15]}"
+        try:
+            # Tenta voltar a janela principal em caso de erro fatal
             if len(driver.window_handles) > 1:
                 driver.close()
                 driver.switch_to.window(driver.window_handles[0])
-        else:
-            resultado['status'] = 'erro_interacao'
-            resultado['mensagem'] = 'Detalhe não abriu'
-    except Exception as e: resultado['mensagem'] = f"Erro: {str(e)[:15]}"
+        except: pass
+        
     return resultado
 
 # ================= INTERFACE PRINCIPAL =================
@@ -167,12 +219,12 @@ with col_logo:
 
 with col_title:
     st.markdown("<h1 style='margin-top: -10px;'>Sistema Integrado ANTT</h1>", unsafe_allow_html=True)
-    st.caption("Automação de Consultas e Gestão de Planilhas")
+    st.caption("Automação de Consultas e Gestão de Planilhas (Versão Verificada)")
 
 # ABAS DO SISTEMA
 tab_robo, tab_comparador = st.tabs(["🤖 Robô de Consulta", "⚖️ Comparador de Planilhas"])
 
-# ================= ABA 1: ROBÔ (CÓDIGO ANTERIOR) =================
+# ================= ABA 1: ROBÔ =================
 with tab_robo:
     if 'df_final' not in st.session_state: st.session_state.df_final = None
     if 'logs' not in st.session_state: st.session_state.logs = []
@@ -186,7 +238,7 @@ with tab_robo:
         remover_duplicados = st.checkbox("Remover duplicados", value=True)
         limitador = st.number_input("Limite (0=Tudo)", min_value=0, value=0)
 
-    st.info("Utilize esta aba para consultar os processos no site da ANTT.")
+    st.info("O robô agora valida se os dados foram realmente lidos antes de confirmar o sucesso.")
     uploaded_file = st.file_uploader("📂 Planilha de Entrada (.xlsx)", type=['xlsx'], key="upload_robo")
 
     if uploaded_file and st.button("▶️ Iniciar Robô"):
@@ -236,8 +288,8 @@ with tab_robo:
                         auto = normalizar_auto(row[config.col_auto])
                         status_atual = str(row[config.col_status])
                         
-                        if pular_feitos and ("Sucesso" in status_atual or "Processo" in status_atual):
-                            st.session_state.logs.insert(0, f"⏭️ {index+1}/{total}: {auto} (Pulado)")
+                        if pular_feitos and ("Sucesso" in status_atual or "Processo" in status_atual) and len(str(row[config.col_processo])) > 5:
+                            st.session_state.logs.insert(0, f"⏭️ {index+1}/{total}: {auto} (Já preenchido)")
                             log_placeholder.text("\n".join(st.session_state.logs[:10]))
                             progress_bar.progress((index + 1) / total)
                             continue
@@ -250,11 +302,16 @@ with tab_robo:
                             res = consultar_auto(driver, auto, config)
                             cache[auto] = res
                         
+                        # ATUALIZAÇÃO SEGURA
                         df.at[index, config.col_status] = res['mensagem']
                         if res['status'] == 'sucesso':
-                            df.at[index, config.col_processo] = res['dados'].get('processo', '')
-                            df.at[index, config.col_andamento] = res['dados'].get('ultimo_andamento', '')
-                            icon = "✅"
+                            if res['dados'].get('processo'): # Só atualiza se tiver dados
+                                df.at[index, config.col_processo] = res['dados'].get('processo', '')
+                                df.at[index, config.col_andamento] = res['dados'].get('ultimo_andamento', '')
+                                icon = "✅"
+                            else:
+                                df.at[index, config.col_status] = "Dados em branco"
+                                icon = "⚠️"
                         elif res['status'] == 'nao_encontrado': icon = "⚠️"
                         else: icon = "❌"
                         
@@ -279,75 +336,46 @@ with tab_robo:
             st.session_state.df_final.to_excel(writer, index=False)
         st.download_button("📥 Baixar Planilha (Backup)", data=buffer.getvalue(), file_name="Planilha_ANTT_Backup.xlsx")
 
-# ================= ABA 2: COMPARADOR (NOVO CÓDIGO) =================
+# ================= ABA 2: COMPARADOR =================
 with tab_comparador:
     st.markdown("### ⚖️ Conciliação de Novos Autos")
-    st.markdown("""
-    Use esta ferramenta para verificar se há novos autos na planilha **Controle GEAUT** que ainda não estão na planilha de **Entrada**.
-    """)
-
+    st.markdown("Use esta ferramenta para verificar novos autos na planilha Controle GEAUT.")
+    
     col1, col2 = st.columns(2)
-    with col1:
-        file_geaut = st.file_uploader("1. Planilha Controle GEAUT (Fonte)", type=['xlsx'], key="up_geaut")
-    with col2:
-        file_entrada = st.file_uploader("2. Planilha Entrada (Destino)", type=['xlsx'], key="up_entrada")
+    with col1: file_geaut = st.file_uploader("1. GEAUT (Fonte)", type=['xlsx'], key="up_geaut")
+    with col2: file_entrada = st.file_uploader("2. Entrada (Destino)", type=['xlsx'], key="up_entrada")
 
     if file_geaut and file_entrada:
-        if st.button("🔄 Comparar e Atualizar Planilha de Entrada"):
+        if st.button("🔄 Comparar"):
             try:
-                # Carregar Planilhas
                 df_geaut = pd.read_excel(file_geaut)
                 df_entrada = pd.read_excel(file_entrada)
                 
-                col_chave = "Auto de Infração"
+                col_auto_geaut = next((c for c in df_geaut.columns if "Auto" in c and "Infração" in c), None)
+                col_auto_entrada = next((c for c in df_entrada.columns if "Auto" in c and "Infração" in c), None)
 
-                # Verificar se a coluna existe em ambas
-                if col_chave not in df_geaut.columns or col_chave not in df_entrada.columns:
-                    st.error(f"Erro: A coluna '{col_chave}' precisa existir em AMBAS as planilhas.")
+                if not col_auto_geaut or not col_auto_entrada:
+                    st.error("Erro: Coluna 'Auto de Infração' não encontrada.")
                     st.stop()
 
-                # Normalizar para comparação (Maiúsculo, sem espaços)
-                geaut_autos = set(df_geaut[col_chave].apply(normalizar_auto))
-                entrada_autos = set(df_entrada[col_chave].apply(normalizar_auto))
-
-                # Encontrar Novos Autos (que estão no GEAUT mas não na Entrada)
-                novos_autos = geaut_autos - entrada_autos
-                qtd_novos = len(novos_autos)
-
-                if qtd_novos == 0:
-                    st.success("✅ Tudo atualizado! Não há novos autos para importar.")
+                geaut_autos = set(df_geaut[col_auto_geaut].astype(str).apply(normalizar_auto))
+                entrada_autos = set(df_entrada[col_auto_entrada].astype(str).apply(normalizar_auto))
+                novos = geaut_autos - entrada_autos
+                
+                if len(novos) == 0:
+                    st.success("✅ Tudo atualizado!")
                 else:
-                    st.warning(f"⚠️ Encontrados {qtd_novos} novos autos no GEAUT que não estavam na Entrada.")
-                    
-                    # Criar DataFrame com os novos autos
-                    df_novos = pd.DataFrame({col_chave: list(novos_autos)})
-                    
-                    # Adicionar colunas extras vazias para manter padrão
-                    cols_extras = ['Nº do Processo', 'Status Consulta', 'Último Andamento']
-                    for col in cols_extras:
+                    st.warning(f"⚠️ {len(novos)} novos autos encontrados.")
+                    df_novos = pd.DataFrame({col_auto_entrada: list(novos)})
+                    for col in ['Nº do Processo', 'Status Consulta', 'Último Andamento']:
                         df_novos[col] = ""
+                    df_final = pd.concat([df_entrada, df_novos], ignore_index=True)
+                    download_automatico(df_final, "entrada_atualizada.xlsx")
+                    
+                    with st.expander("Ver novos"): st.dataframe(df_novos)
+                    
+                    b = io.BytesIO()
+                    with pd.ExcelWriter(b, engine='openpyxl') as w: df_final.to_excel(w, index=False)
+                    st.download_button("📥 Baixar Atualizada", data=b.getvalue(), file_name="entrada_atualizada.xlsx")
 
-                    # Concatenar (Adicionar ao final)
-                    df_final_entrada = pd.concat([df_entrada, df_novos], ignore_index=True)
-                    
-                    st.success("✅ Planilha atualizada com sucesso!")
-                    
-                    # Visualização
-                    with st.expander("Ver lista de novos autos adicionados"):
-                        st.dataframe(df_novos)
-                    
-                    # Download
-                    download_automatico(df_final_entrada, "entrada_atualizada_com_novos.xlsx")
-                    
-                    buffer_comp = io.BytesIO()
-                    with pd.ExcelWriter(buffer_comp, engine='openpyxl') as writer:
-                        df_final_entrada.to_excel(writer, index=False)
-                    st.download_button(
-                        label="📥 Baixar Planilha Entrada Atualizada",
-                        data=buffer_comp,
-                        file_name="entrada_atualizada_com_novos.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-            except Exception as e:
-                st.error(f"Erro ao processar planilhas: {e}")
+            except Exception as e: st.error(f"Erro: {e}")

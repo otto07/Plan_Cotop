@@ -4,7 +4,7 @@ import time
 import io
 import os
 import base64
-import random
+import gc # Importante para limpeza de memória
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -27,10 +27,12 @@ class ConfigWeb:
         self.col_processo = 'Nº do Processo'
         self.col_status = 'Status Consulta'
         self.col_andamento = 'Último Andamento'
-        self.timeout_padrao = 30 
-        self.sleep_pos_clique = 6 
+        self.timeout_padrao = 25
+        self.sleep_pos_clique = 5
+        # === NOVO: Configuração de Lote ===
+        self.reiniciar_a_cada = 30 # A cada 30 consultas, fecha tudo e reabre para não travar
 
-# ================= FUNÇÃO DE DOWNLOAD AUTOMÁTICO =================
+# ================= DOWNLOAD AUTOMÁTICO =================
 def download_automatico(df):
     try:
         buffer = io.BytesIO()
@@ -43,7 +45,7 @@ def download_automatico(df):
         <script>
             var link = document.createElement('a');
             link.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}';
-            link.download = 'Planilha_Atualizada_ANTT.xlsx';
+            link.download = 'Planilha_ANTT_Parcial.xlsx';
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
@@ -51,17 +53,21 @@ def download_automatico(df):
         """
         st.components.v1.html(md, height=0)
         return True
-    except Exception as e:
-        return False
+    except Exception: return False
 
-# ================= DRIVER =================
+# ================= DRIVER OTIMIZADO =================
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-dev-shm-usage") # Essencial para Docker/Cloud
     chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--window-size=1920,1080")
+    # Limpa cache de disco para economizar espaço
+    chrome_options.add_argument("--disk-cache-size=1") 
+    chrome_options.add_argument("--media-cache-size=1")
+    
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     return webdriver.Chrome(options=chrome_options)
 
@@ -71,7 +77,7 @@ def realizar_login(driver, usuario, senha, config):
     try:
         if "ConsultaProcessoSituacao" not in driver.current_url:
             driver.get(config.url_login)
-            time.sleep(5)
+            time.sleep(4)
         
         if "sca/Site/Login" in driver.current_url:
             try:
@@ -85,16 +91,16 @@ def realizar_login(driver, usuario, senha, config):
             try:
                 wait.until(EC.presence_of_element_located((By.ID, "accountId"))).send_keys(usuario)
                 driver.find_element(By.XPATH, "//button[contains(text(), 'Continuar')]").click()
-                time.sleep(5)
+                time.sleep(4)
                 wait.until(EC.presence_of_element_located((By.ID, "password"))).send_keys(senha)
                 driver.find_element(By.ID, "submit-button").click()
-                time.sleep(8) 
+                time.sleep(6) 
             except: pass
 
         if "ConsultaProcessoSituacao" in driver.current_url: return True
         
         driver.get(config.url_consulta)
-        time.sleep(5)
+        time.sleep(4)
         if "ConsultaProcessoSituacao" in driver.current_url: return True
              
         return False
@@ -103,7 +109,9 @@ def realizar_login(driver, usuario, senha, config):
 # ================= GARANTIR SESSÃO =================
 def garantir_sessao(driver, usuario, senha, config):
     try:
-        if "ConsultaProcessoSituacao" not in driver.current_url or "Login" in driver.current_url:
+        # Verifica se caiu na tela de login ou erro
+        url = driver.current_url.lower()
+        if "consultaprocessosituacao" not in url or "login" in url:
             return realizar_login(driver, usuario, senha, config)
         return True
     except: return False
@@ -116,18 +124,18 @@ def consultar_auto(driver, auto, config):
     try:
         if "ConsultaProcessoSituacao" not in driver.current_url:
              driver.get(config.url_consulta)
-             time.sleep(3)
+             time.sleep(2)
         
         try:
             campo = wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
             campo.clear()
             campo.send_keys(auto)
             
-            btn_pesquisar = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar")
-            driver.execute_script("arguments[0].click();", btn_pesquisar)
+            btn = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar")
+            driver.execute_script("arguments[0].click();", btn)
             time.sleep(config.sleep_pos_clique)
             
-        except: return {'status': 'erro_conexao', 'dados': {}, 'mensagem': 'Site não respondeu'}
+        except: return {'status': 'erro_conexao', 'dados': {}, 'mensagem': 'Timeout pesquisa'}
         
         src = driver.page_source.lower()
         if "nenhum registro" in src or "não encontrado" in src:
@@ -135,29 +143,28 @@ def consultar_auto(driver, auto, config):
             resultado['mensagem'] = 'Auto não localizado'
             return resultado
 
-        sucesso_clique = False
-        for i in range(3):
+        sucesso = False
+        for _ in range(3): # 3 Tentativas de abrir detalhe
             try:
-                btn = driver.find_element(By.XPATH, "//input[contains(@id, 'btnEditar')] | //a[contains(@title, 'Editar')]")
-                driver.execute_script("arguments[0].click();", btn)
-                time.sleep(config.sleep_pos_clique + 2) 
+                btn_edit = driver.find_element(By.XPATH, "//input[contains(@id, 'btnEditar')] | //a[contains(@title, 'Editar')]")
+                driver.execute_script("arguments[0].click();", btn_edit)
+                time.sleep(config.sleep_pos_clique)
                 
                 if len(driver.window_handles) > 1:
                     driver.switch_to.window(driver.window_handles[-1])
                     wait.until(EC.presence_of_element_located((By.XPATH, "//*[contains(@id, 'txbProcesso')]")))
-                    sucesso_clique = True
+                    sucesso = True
                     break
-                else: time.sleep(3)
-            except: time.sleep(3)
+                time.sleep(2)
+            except: time.sleep(2)
         
-        if sucesso_clique:
+        if sucesso:
             dados = {}
             try:
                 dados['processo'] = driver.find_element(By.XPATH, "//*[contains(@id, 'txbProcesso')]").get_attribute('value')
                 try:
-                    linhas = driver.find_elements(By.XPATH, "//table[contains(@class, 'tabela-conteudo')]//tr")
-                    if len(linhas) > 1:
-                        dados['ultimo_andamento'] = linhas[-1].find_elements(By.TAG_NAME, "td")[1].text
+                    trs = driver.find_elements(By.XPATH, "//table[contains(@class, 'tabela-conteudo')]//tr")
+                    if len(trs) > 1: dados['ultimo_andamento'] = trs[-1].find_elements(By.TAG_NAME, "td")[1].text
                     else: dados['ultimo_andamento'] = "Sem histórico"
                 except: dados['ultimo_andamento'] = "-"
             except: dados['processo'] = "Erro leitura"
@@ -171,54 +178,46 @@ def consultar_auto(driver, auto, config):
                 driver.switch_to.window(driver.window_handles[0])
         else:
             resultado['status'] = 'erro_interacao'
-            resultado['mensagem'] = 'Site lento: Detalhe não abriu'
+            resultado['mensagem'] = 'Detalhe não abriu'
 
-    except Exception as e: resultado['mensagem'] = f"Erro técnico: {str(e)[:20]}"
+    except Exception as e: resultado['mensagem'] = f"Erro: {str(e)[:15]}"
         
     return resultado
 
 # ================= INTERFACE =================
-
-# Layout do Cabeçalho (Logo + Título)
-col_logo, col_title = st.columns([1, 6]) # Ajustei a proporção para o título ficar mais perto
-
+col_logo, col_title = st.columns([1, 6])
 with col_logo:
-    # 1. Tenta carregar imagem local (se você subiu no GitHub)
-    if os.path.exists("logo.png"):
-        st.image("logo.png", width=100)
-    # 2. Se não existir, tenta URL alternativa da internet (SVG costuma ser mais estável)
-    else:
-        st.image("https://upload.wikimedia.org/wikipedia/commons/5/52/Logo_ANTT.svg", width=100)
+    if os.path.exists("logo.png"): st.image("logo.png", width=100)
+    else: st.image("https://upload.wikimedia.org/wikipedia/commons/5/52/Logo_ANTT.svg", width=100)
 
 with col_title:
     st.markdown("<h1 style='margin-top: -10px;'>Atualizador de Planilha Controle</h1>", unsafe_allow_html=True)
-    st.caption("Sistema automatizado de consulta e atualização de processos.")
+    st.caption("Sistema Otimizado com Gestão de Memória e Auto-Recuperação")
 
 st.divider()
 
-if 'df_final' not in st.session_state:
-    st.session_state.df_final = None
+if 'df_final' not in st.session_state: st.session_state.df_final = None
+if 'logs' not in st.session_state: st.session_state.logs = []
 
 with st.sidebar:
-    st.header("🔐 Credenciais de Acesso")
+    st.header("🔐 Credenciais")
     cpf_input = st.text_input("Usuário/CPF")
     senha_input = st.text_input("Senha", type="password")
-    
     st.divider()
-    st.subheader("⚙️ Configurações")
-    pular_feitos = st.checkbox("Pular registros já concluídos", value=True)
-    remover_duplicados = st.checkbox("Remover autos duplicados", value=True)
-    limitador = st.number_input("Limite de linhas (0 = Tudo)", min_value=0, value=0)
+    pular_feitos = st.checkbox("Pular já concluídos", value=True)
+    remover_duplicados = st.checkbox("Remover duplicados", value=True)
+    limitador = st.number_input("Limite (0=Tudo)", min_value=0, value=0)
 
-uploaded_file = st.file_uploader("📂 Carregar Planilha de Entrada (.xlsx)", type=['xlsx'])
+uploaded_file = st.file_uploader("📂 Planilha (.xlsx)", type=['xlsx'])
 
-if uploaded_file and st.button("▶️ Iniciar Atualização"):
+if uploaded_file and st.button("▶️ Iniciar"):
     if not cpf_input or not senha_input:
-        st.error("⚠️ Por favor, preencha as credenciais de acesso.")
+        st.error("⚠️ Preencha o Login!")
     else:
         config = ConfigWeb()
         df = pd.read_excel(uploaded_file)
         
+        # Limpeza Inicial
         for col in [config.col_processo, config.col_status, config.col_andamento, config.col_auto]:
              if col in df.columns: df[col] = df[col].astype(str).replace('nan', '')
              else: df[col] = ""
@@ -226,48 +225,66 @@ if uploaded_file and st.button("▶️ Iniciar Atualização"):
         if remover_duplicados: df = df.drop_duplicates(subset=[config.col_auto], keep='first')
         if limitador > 0: df = df.head(limitador)
 
-        status_box = st.status("Inicializando sistema...", expanded=True)
+        # UI Components
+        status_box = st.status("Inicializando...", expanded=True)
         progress_bar = st.progress(0)
-        with st.expander("📜 Log de Execução", expanded=True):
-            log_container = st.empty()
-            
-        logs = []
-        cache_consultas = {} 
+        log_placeholder = st.empty() # Área para logs
+        
         driver = get_driver()
+        cache = {}
         
         try:
-            status_box.write("🔐 Autenticando no sistema ANTT...")
+            status_box.write("🔐 Logando...")
             if not realizar_login(driver, cpf_input, senha_input, config):
-                st.error("❌ Falha na autenticação. Verifique usuário e senha.")
-                status_box.update(label="Erro de Login", state="error")
+                st.error("❌ Falha Login")
+                status_box.update(label="Erro Login", state="error")
             else:
-                status_box.write("✅ Autenticado. Iniciando varredura...")
+                status_box.write("✅ Logado! Iniciando...")
                 total = len(df)
                 df = df.reset_index(drop=True)
+                
+                contador_lote = 0 # Contador para reiniciar navegador
 
                 for index, row in df.iterrows():
+                    # === GESTÃO DE MEMÓRIA (O SEGREDO DO SUCESSO) ===
+                    contador_lote += 1
+                    if contador_lote >= config.reiniciar_a_cada:
+                        status_box.write("🧹 Limpando memória RAM (Reiniciando navegador)...")
+                        driver.quit()
+                        gc.collect() # Força limpeza do Python
+                        time.sleep(2)
+                        driver = get_driver() # Abre novo limpo
+                        realizar_login(driver, cpf_input, senha_input, config)
+                        contador_lote = 0 # Zera contador
+                        status_box.write("♻️ Navegador reiniciado. Continuando...")
+
                     auto = str(row[config.col_auto]).strip()
                     status_atual = str(row[config.col_status])
                     
+                    # Lógica de Pular
                     if pular_feitos and ("Sucesso" in status_atual or "Processo" in status_atual):
-                        logs.insert(0, f"⏭️ [{index+1}/{total}] {auto}: Já processado anteriormente")
-                        log_container.text("\n".join(logs[:15]))
+                        msg = f"⏭️ {index+1}/{total}: {auto} (Pulado)"
+                        st.session_state.logs.insert(0, msg)
+                        log_placeholder.text("\n".join(st.session_state.logs[:10]))
                         progress_bar.progress((index + 1) / total)
                         continue
 
-                    if auto in cache_consultas:
-                        res = cache_consultas[auto]
-                        logs.insert(0, f"♻️ [{index+1}/{total}] {auto}: Recuperado do cache")
+                    # Lógica de Consulta
+                    if auto in cache:
+                        res = cache[auto]
+                        st.session_state.logs.insert(0, f"♻️ {index+1}/{total}: {auto} (Cache)")
                     else:
-                        status_box.update(label=f"🔄 Processando {index+1}/{total}: {auto} (Verificando sessão...)")
-                        if not garantir_sessao(driver, cpf_input, senha_input, config):
-                            logs.insert(0, f"⛔ [{index+1}/{total}] {auto}: Sessão expirou e não renovou")
-                            continue 
+                        status_box.update(label=f"🔄 [{index+1}/{total}] Consultando: {auto}")
                         
-                        status_box.update(label=f"🔎 Consultando {index+1}/{total}: {auto}...")
+                        # Verifica sessão antes
+                        if not garantir_sessao(driver, cpf_input, senha_input, config):
+                            st.session_state.logs.insert(0, f"⛔ {index+1}/{total}: Sessão caiu")
+                            continue
+                            
                         res = consultar_auto(driver, auto, config)
-                        cache_consultas[auto] = res
+                        cache[auto] = res
                     
+                    # Salva Resultado
                     df.at[index, config.col_status] = res['mensagem']
                     if res['status'] == 'sucesso':
                         df.at[index, config.col_processo] = res['dados'].get('processo', '')
@@ -276,34 +293,35 @@ if uploaded_file and st.button("▶️ Iniciar Atualização"):
                     elif res['status'] == 'nao_encontrado': icon = "⚠️"
                     else: icon = "❌"
                     
-                    logs.insert(0, f"{icon} [{index+1}/{total}] {auto}: {res['mensagem']}")
-                    log_container.text("\n".join(logs[:15]))
+                    # Atualiza Logs
+                    st.session_state.logs.insert(0, f"{icon} {index+1}/{total}: {auto} - {res['mensagem']}")
+                    log_placeholder.text("\n".join(st.session_state.logs[:10]))
                     progress_bar.progress((index + 1) / total)
+                    
+                    # SALVA ESTADO PARCIAL A CADA LINHA (Para não perder tudo se cair)
+                    st.session_state.df_final = df.copy()
 
-                status_box.update(label="Processamento Concluído! Iniciando download...", state="complete")
-                
-                st.session_state.df_final = df
-                st.success("Processamento finalizado com sucesso!")
-                
+                status_box.update(label="Concluído!", state="complete")
+                st.success("Finalizado!")
                 download_automatico(df)
 
         except Exception as e:
             st.error(f"Erro Crítico: {e}")
         finally:
-            driver.quit()
+            if driver: driver.quit()
 
-# ================= ÁREA DE DOWNLOAD MANUAL =================
+# ================= DOWNLOAD MANUAL =================
 if st.session_state.df_final is not None:
     st.divider()
-    st.info("Caso o download não tenha iniciado, clique abaixo:")
+    st.info("Backup dos dados processados disponível abaixo:")
     
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         st.session_state.df_final.to_excel(writer, index=False)
     
     st.download_button(
-        label="📥 Baixar Planilha Atualizada",
+        label="📥 Baixar Planilha (Backup)",
         data=buffer.getvalue(),
-        file_name="Planilha_Atualizada_ANTT.xlsx",
+        file_name="Planilha_ANTT_Backup.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )

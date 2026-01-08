@@ -101,7 +101,7 @@ class WebDriverManager:
             st.stop()
 
 # =============================================================================
-# GERENCIADOR DE LOGIN
+# GERENCIADOR DE LOGIN (VERSÃO CORRIGIDA)
 # =============================================================================
 class LoginManager:
     """Gerencia autenticação no sistema ANTT com debug visual completo"""
@@ -120,69 +120,43 @@ class LoginManager:
             except Exception as e:
                 st.warning(f"Não foi possível capturar screenshot: {e}")
     
-    def _verificar_valor_campo(self, elemento, valor_esperado: str) -> bool:
-        """Verifica se o valor foi realmente inserido no campo"""
+    def _inserir_texto_seguro(self, elemento, texto: str) -> bool:
+        """Insere texto garantindo que foi registrado"""
         try:
-            valor_atual = elemento.get_attribute('value')
-            if DEBUG_MODE:
-                st.info(f"📝 Valor no campo: '{valor_atual}' | Esperado: '{valor_esperado}'")
-            return valor_atual == valor_esperado
-        except:
-            return False
-    
-    def _inserir_texto_robusto(self, elemento, texto: str, nome_campo: str) -> bool:
-        """Insere texto com múltiplas técnicas de fallback"""
-        
-        # Técnica 1: Send Keys Normal
-        try:
-            elemento.click()
-            time.sleep(0.3)
+            # Limpa o campo
             elemento.clear()
+            time.sleep(0.5)
+            
+            # Insere via send_keys
+            elemento.click()
             time.sleep(0.3)
             elemento.send_keys(texto)
             time.sleep(0.5)
             
-            if self._verificar_valor_campo(elemento, texto):
-                if DEBUG_MODE:
-                    st.success(f"✅ {nome_campo} inserido via send_keys")
+            # Verifica
+            valor = elemento.get_attribute('value')
+            if len(valor) == len(texto):
                 return True
-        except Exception as e:
-            if DEBUG_MODE:
-                st.warning(f"⚠️ send_keys falhou: {e}")
-        
-        # Técnica 2: JavaScript Injection
-        try:
+            
+            # Fallback: JavaScript
             self.driver.execute_script(f"arguments[0].value = '{texto}';", elemento)
-            time.sleep(0.5)
+            time.sleep(0.3)
             
-            if self._verificar_valor_campo(elemento, texto):
-                if DEBUG_MODE:
-                    st.success(f"✅ {nome_campo} inserido via JavaScript")
-                return True
+            # Dispara eventos
+            self.driver.execute_script("""
+                arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
+                arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+            """, elemento)
+            
+            return True
+            
         except Exception as e:
             if DEBUG_MODE:
-                st.warning(f"⚠️ JavaScript falhou: {e}")
-        
-        # Técnica 3: Char por Char
-        try:
-            elemento.clear()
-            for char in texto:
-                elemento.send_keys(char)
-                time.sleep(0.05)
-            
-            time.sleep(0.5)
-            if self._verificar_valor_campo(elemento, texto):
-                if DEBUG_MODE:
-                    st.success(f"✅ {nome_campo} inserido char-by-char")
-                return True
-        except Exception as e:
-            if DEBUG_MODE:
-                st.warning(f"⚠️ Char-by-char falhou: {e}")
-        
-        return False
+                st.error(f"Erro ao inserir texto: {e}")
+            return False
     
     def realizar_login(self, usuario: str, senha: str) -> bool:
-        """Processo completo de login com debug detalhado"""
+        """Processo completo de login otimizado"""
         
         try:
             st.info("🌐 Acessando página de login...")
@@ -192,170 +166,178 @@ class LoginManager:
             self._tirar_screenshot_debug("01 - Página Inicial")
             
             # ============================================================
-            # ETAPA 1: INSERIR USUÁRIO
+            # ETAPA 1: USUÁRIO
             # ============================================================
             st.info("👤 Inserindo usuário...")
             
             id_user = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_TextBoxUsuario"
             
-            try:
-                campo_user = self.wait.until(EC.element_to_be_clickable((By.ID, id_user)))
-                
-                if not self._inserir_texto_robusto(campo_user, usuario, "Usuário"):
-                    st.error("❌ Falha ao inserir usuário após todas as tentativas")
-                    self._tirar_screenshot_debug("ERRO - Usuário não inserido")
-                    return False
-                
-                st.success("✅ Usuário inserido com sucesso")
-                self._tirar_screenshot_debug("02 - Usuário Inserido")
-                
-            except Exception as e:
-                st.error(f"❌ Erro ao localizar campo de usuário: {e}")
-                self._tirar_screenshot_debug("ERRO - Campo usuário não encontrado")
+            campo_user = self.wait.until(EC.element_to_be_clickable((By.ID, id_user)))
+            
+            if not self._inserir_texto_seguro(campo_user, usuario):
+                st.error("❌ Falha ao inserir usuário")
                 return False
             
+            st.success("✅ Usuário inserido")
+            self._tirar_screenshot_debug("02 - Usuário OK")
+            
             # ============================================================
-            # ETAPA 2: CLICAR BOTÃO OK (AVANÇAR)
+            # ETAPA 2: BOTÃO OK
             # ============================================================
             st.info("▶️ Avançando para senha...")
             
             id_btn_ok = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk"
+            btn_ok = self.wait.until(EC.element_to_be_clickable((By.ID, id_btn_ok)))
             
-            try:
-                btn_ok = self.wait.until(EC.element_to_be_clickable((By.ID, id_btn_ok)))
-                
-                # Tenta click normal
-                try:
-                    btn_ok.click()
-                except:
-                    # Fallback: JavaScript click
-                    self.driver.execute_script("arguments[0].click();", btn_ok)
-                
-                # Aguarda postback do ASP.NET
-                time.sleep(4)
-                
-                self._tirar_screenshot_debug("03 - Após clicar OK")
-                
-            except Exception as e:
-                st.error(f"❌ Erro ao clicar botão OK: {e}")
-                self._tirar_screenshot_debug("ERRO - Botão OK")
-                return False
+            # Scroll até o botão
+            self.driver.execute_script("arguments[0].scrollIntoView(true);", btn_ok)
+            time.sleep(0.5)
+            
+            # Clica
+            self.driver.execute_script("arguments[0].click();", btn_ok)
+            
+            # CRÍTICO: Aguarda o postback ASP.NET completar
+            time.sleep(5)
+            
+            self._tirar_screenshot_debug("03 - Após OK")
             
             # ============================================================
-            # ETAPA 3: INSERIR SENHA (CRÍTICO)
+            # ETAPA 3: SENHA (CRÍTICO - VERSÃO CORRIGIDA)
             # ============================================================
-            st.info("🔒 Processando campo de senha...")
+            st.info("🔒 Localizando campo de senha...")
+            
+            # Aguarda campo de senha aparecer
+            xpath_senha = "//input[@type='password']"
             
             try:
-                # Aguarda campo de senha aparecer
-                xpath_senha = "//input[@type='password']"
-                
                 campo_senha = self.wait.until(
                     EC.visibility_of_element_located((By.XPATH, xpath_senha))
                 )
-                
-                st.success("✅ Campo de senha encontrado!")
-                
-                # Aguarda JavaScript da página carregar
-                time.sleep(2)
-                
-                self._tirar_screenshot_debug("04 - Campo senha encontrado")
-                
-                # Tenta inserir senha
-                st.info("🔑 Inserindo senha...")
-                
-                if not self._inserir_texto_robusto(campo_senha, senha, "Senha"):
-                    st.error("❌ Falha crítica: senha não foi inserida!")
-                    self._tirar_screenshot_debug("ERRO CRÍTICO - Senha vazia")
-                    
-                    # Mostra HTML do campo para debug
-                    if DEBUG_MODE:
-                        html_campo = self.driver.execute_script("return arguments[0].outerHTML;", campo_senha)
-                        st.code(html_campo, language="html")
-                    
-                    return False
-                
-                # Verifica tamanho da senha
-                tamanho_senha = len(campo_senha.get_attribute('value'))
-                st.success(f"✅ Senha inserida! (Tamanho: {tamanho_senha} caracteres)")
-                
-                # Dispara eventos de validação
-                if DEBUG_MODE:
-                    st.info("🔄 Disparando eventos de validação...")
-                
-                self.driver.execute_script("""
-                    arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
-                    arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
-                    arguments[0].dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-                    arguments[0].dispatchEvent(new Event('blur', { bubbles: true }));
-                """, campo_senha)
-                
-                time.sleep(1)
-                
-                self._tirar_screenshot_debug("05 - Antes de submeter")
-                
-                # ========== SUBMETER FORMULÁRIO ==========
-                st.info("📤 Enviando formulário...")
-                
-                # Tenta encontrar botão de submit
-                botao_clicado = False
-                
-                xpaths_botoes = [
-                    "//input[@type='submit' and contains(@id, 'Button')]",
-                    "//button[@type='submit']",
-                    "//input[@value='Entrar' or @value='Login' or @value='Acessar']",
-                    "//button[contains(text(), 'Entrar') or contains(text(), 'Login')]",
-                    "//*[contains(@id, 'ButtonLogin') or contains(@id, 'btnLogin')]"
+                st.success("✅ Campo de senha encontrado")
+            except:
+                st.error("❌ Campo de senha não apareceu após 20 segundos")
+                self._tirar_screenshot_debug("ERRO - Senha não apareceu")
+                return False
+            
+            # Aguarda JavaScript da página carregar completamente
+            time.sleep(3)
+            
+            self._tirar_screenshot_debug("04 - Campo senha visível")
+            
+            # Insere senha
+            st.info("🔑 Inserindo senha...")
+            
+            if not self._inserir_texto_seguro(campo_senha, senha):
+                st.error("❌ Falha ao inserir senha")
+                return False
+            
+            # Verifica tamanho
+            tamanho = len(campo_senha.get_attribute('value'))
+            st.success(f"✅ Senha inserida ({tamanho} caracteres)")
+            
+            if tamanho == 0:
+                st.error("❌ Senha foi limpa - site pode estar bloqueando automação")
+                self._tirar_screenshot_debug("ERRO - Senha vazia")
+                return False
+            
+            time.sleep(1)
+            self._tirar_screenshot_debug("05 - Senha inserida")
+            
+            # ============================================================
+            # ETAPA 4: SUBMETER (VERSÃO MELHORADA)
+            # ============================================================
+            st.info("📤 Enviando formulário...")
+            
+            # Tenta múltiplas estratégias de submit
+            submit_sucesso = False
+            
+            # Estratégia 1: Procurar botão específico do segundo form
+            try:
+                # IDs possíveis para o botão de login (após inserir senha)
+                ids_botoes = [
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonLogin",
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnLogin",
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_Button1"
                 ]
                 
-                for xpath in xpaths_botoes:
+                for btn_id in ids_botoes:
                     try:
-                        btn = self.driver.find_element(By.XPATH, xpath)
-                        if DEBUG_MODE:
-                            st.info(f"🎯 Botão encontrado: {xpath}")
+                        btn_login = self.driver.find_element(By.ID, btn_id)
+                        st.info(f"🎯 Botão encontrado: {btn_id}")
                         
-                        # Scroll até o botão
-                        self.driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                        # Scroll e clique
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", btn_login)
                         time.sleep(0.5)
+                        self.driver.execute_script("arguments[0].click();", btn_login)
                         
-                        # Tenta clicar
-                        try:
-                            btn.click()
-                        except:
-                            self.driver.execute_script("arguments[0].click();", btn)
-                        
-                        botao_clicado = True
+                        submit_sucesso = True
+                        st.success("✅ Botão clicado")
                         break
                     except:
                         continue
-                
-                if not botao_clicado:
-                    if DEBUG_MODE:
-                        st.warning("⚠️ Botão não encontrado, enviando ENTER...")
-                    campo_senha.send_keys(Keys.RETURN)
-                
-                # Aguarda resposta
-                time.sleep(4)
-                
-                self._tirar_screenshot_debug("06 - Após submeter")
-                
-            except Exception as e:
-                st.error(f"❌ Erro na etapa de senha: {e}")
-                self._tirar_screenshot_debug("ERRO - Processamento senha")
-                
-                if DEBUG_MODE:
-                    st.code(str(e), language="python")
-                
-                return False
+            except:
+                pass
+            
+            # Estratégia 2: Procurar por XPath
+            if not submit_sucesso:
+                try:
+                    xpaths = [
+                        "//input[@type='submit' and contains(@id, 'Button')]",
+                        "//button[@type='submit']",
+                        "//input[@value='Entrar']",
+                        "//input[@value='Login']",
+                        "//button[contains(text(), 'Entrar')]"
+                    ]
+                    
+                    for xpath in xpaths:
+                        try:
+                            btn = self.driver.find_element(By.XPATH, xpath)
+                            st.info(f"🎯 Botão encontrado via XPath")
+                            
+                            self.driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                            time.sleep(0.5)
+                            self.driver.execute_script("arguments[0].click();", btn)
+                            
+                            submit_sucesso = True
+                            break
+                        except:
+                            continue
+                except:
+                    pass
+            
+            # Estratégia 3: Enter no campo de senha
+            if not submit_sucesso:
+                st.info("⌨️ Enviando ENTER no campo de senha...")
+                campo_senha.send_keys(Keys.RETURN)
+                submit_sucesso = True
+            
+            # Estratégia 4: Submit via JavaScript no formulário
+            if not submit_sucesso:
+                try:
+                    st.info("🔧 Tentando submit via JavaScript...")
+                    self.driver.execute_script("""
+                        var forms = document.getElementsByTagName('form');
+                        if (forms.length > 0) {
+                            forms[0].submit();
+                        }
+                    """)
+                    submit_sucesso = True
+                except:
+                    pass
+            
+            # Aguarda processamento
+            time.sleep(5)
+            
+            self._tirar_screenshot_debug("06 - Após submit")
             
             # ============================================================
-            # ETAPA 4: VERIFICAR SUCESSO DO LOGIN
+            # ETAPA 5: VERIFICAR SUCESSO
             # ============================================================
             st.info("🔍 Verificando autenticação...")
             
             try:
-                # Aguarda elemento da página de consulta
-                campo_consulta = self.wait.until(
+                # Aguarda campo de consulta aparecer (sinal de sucesso)
+                campo_consulta = WebDriverWait(self.driver, 15).until(
                     EC.presence_of_element_located(
                         (By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")
                     )
@@ -363,37 +345,38 @@ class LoginManager:
                 
                 st.success("✅ Login realizado com sucesso!")
                 self._tirar_screenshot_debug("07 - LOGIN SUCESSO")
-                
                 return True
                 
-            except Exception as e:
-                st.error(f"❌ Falha na autenticação: {e}")
+            except:
+                st.error("❌ Falha na autenticação")
                 self._tirar_screenshot_debug("08 - FALHA LOGIN")
                 
-                # Análise de erro
+                # Diagnóstico
                 try:
+                    url_atual = self.driver.current_url
+                    st.warning(f"URL atual: {url_atual}")
+                    
                     page_source = self.driver.page_source.lower()
                     
                     if "incorreta" in page_source or "inválid" in page_source:
-                        st.error("🚫 **Diagnóstico:** Credenciais incorretas")
-                    elif "senha" in page_source and "campo" in page_source:
-                        st.error("🚫 **Diagnóstico:** Problema no campo de senha")
-                    elif "bloqueado" in page_source or "bloqueada" in page_source:
-                        st.error("🚫 **Diagnóstico:** Conta pode estar bloqueada")
+                        st.error("🚫 **Credenciais incorretas**")
+                    elif "captcha" in page_source:
+                        st.error("🚫 **CAPTCHA detectado** - site pode estar bloqueando automação")
+                    elif url_atual == self.config.url_login or "login" in url_atual:
+                        st.error("🚫 **Permaneceu na tela de login** - formulário não foi submetido corretamente")
                     else:
-                        st.error("🚫 **Diagnóstico:** Erro desconhecido")
+                        st.error("🚫 **Erro desconhecido**")
                     
                     if DEBUG_MODE:
-                        with st.expander("🔧 Ver HTML da página (Debug)"):
-                            st.code(self.driver.page_source[:3000], language="html")
-                
+                        with st.expander("🔧 HTML da página (Debug)"):
+                            st.code(self.driver.page_source[:2000], language="html")
                 except:
                     pass
                 
                 return False
         
         except Exception as e:
-            st.error(f"❌ Erro fatal no processo de login: {e}")
+            st.error(f"❌ Erro fatal: {e}")
             self._tirar_screenshot_debug("ERRO FATAL")
             
             if DEBUG_MODE:

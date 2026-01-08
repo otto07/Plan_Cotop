@@ -101,7 +101,7 @@ class WebDriverManager:
             st.stop()
 
 # =============================================================================
-# GERENCIADOR DE LOGIN (VERSÃO CORRIGIDA)
+# GERENCIADOR DE LOGIN (VERSÃO FINAL OTIMIZADA)
 # =============================================================================
 class LoginManager:
     """Gerencia autenticação no sistema ANTT com debug visual completo"""
@@ -155,8 +155,34 @@ class LoginManager:
                 st.error(f"Erro ao inserir texto: {e}")
             return False
     
+    def _aguardar_postback_aspnet(self, timeout: int = 10):
+        """Aguarda o postback do ASP.NET completar"""
+        try:
+            # Estratégia 1: Aguarda elemento de loading desaparecer (se existir)
+            time.sleep(1)
+            
+            # Estratégia 2: Aguarda ReadyState da página
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+            
+            # Estratégia 3: Aguarda jQuery terminar (se existir)
+            try:
+                WebDriverWait(self.driver, 2).until(
+                    lambda d: d.execute_script("return typeof jQuery === 'undefined' || jQuery.active === 0")
+                )
+            except:
+                pass
+            
+            if DEBUG_MODE:
+                st.info("✅ Postback ASP.NET completado")
+            
+        except Exception as e:
+            if DEBUG_MODE:
+                st.warning(f"Timeout aguardando postback: {e}")
+    
     def realizar_login(self, usuario: str, senha: str) -> bool:
-        """Processo completo de login otimizado"""
+        """Processo completo de login otimizado para ASP.NET"""
         
         try:
             st.info("🌐 Acessando página de login...")
@@ -182,49 +208,117 @@ class LoginManager:
             self._tirar_screenshot_debug("02 - Usuário OK")
             
             # ============================================================
-            # ETAPA 2: BOTÃO OK
+            # ETAPA 2: BOTÃO OK (COM POSTBACK ASP.NET)
             # ============================================================
-            st.info("▶️ Avançando para senha...")
+            st.info("▶️ Clicando no botão OK...")
             
             id_btn_ok = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk"
+            
+            # Aguarda botão estar clicável
             btn_ok = self.wait.until(EC.element_to_be_clickable((By.ID, id_btn_ok)))
             
             # Scroll até o botão
-            self.driver.execute_script("arguments[0].scrollIntoView(true);", btn_ok)
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_ok)
             time.sleep(0.5)
             
-            # Clica
-            self.driver.execute_script("arguments[0].click();", btn_ok)
+            # Captura URL atual antes do clique (para detectar mudança)
+            url_antes = self.driver.current_url
             
-            # CRÍTICO: Aguarda o postback ASP.NET completar
-            time.sleep(5)
-            
-            self._tirar_screenshot_debug("03 - Após OK")
+            # CLICA NO BOTÃO (vai causar postback)
+            try:
+                btn_ok.click()
+                st.info("✅ Clique normal executado")
+            except:
+                # Fallback: JavaScript
+                self.driver.execute_script("arguments[0].click();", btn_ok)
+                st.info("✅ Clique via JavaScript executado")
             
             # ============================================================
-            # ETAPA 3: SENHA (CRÍTICO - VERSÃO CORRIGIDA)
+            # AGUARDA POSTBACK ASP.NET COMPLETAR
+            # ============================================================
+            st.info("⏳ Aguardando postback ASP.NET...")
+            
+            # Aguarda a página processar o postback (mínimo 2 segundos)
+            time.sleep(2)
+            
+            # Aguarda readyState
+            self._aguardar_postback_aspnet(timeout=10)
+            
+            # Aguarda adicional para garantir que JavaScript carregou
+            time.sleep(3)
+            
+            self._tirar_screenshot_debug("03 - Após clicar OK")
+            
+            # ============================================================
+            # ETAPA 3: CAMPO DE SENHA
             # ============================================================
             st.info("🔒 Localizando campo de senha...")
             
-            # Aguarda campo de senha aparecer
-            xpath_senha = "//input[@type='password']"
+            # Tenta localizar de múltiplas formas
+            campo_senha = None
             
+            # Método 1: Por tipo password
             try:
                 campo_senha = self.wait.until(
-                    EC.visibility_of_element_located((By.XPATH, xpath_senha))
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
                 )
-                st.success("✅ Campo de senha encontrado")
+                st.success("✅ Campo senha encontrado (tipo password)")
             except:
-                st.error("❌ Campo de senha não apareceu após 20 segundos")
-                self._tirar_screenshot_debug("ERRO - Senha não apareceu")
+                pass
+            
+            # Método 2: Por ID possível
+            if not campo_senha:
+                ids_possiveis = [
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_TextBoxSenha",
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txtSenha",
+                    "TextBoxSenha",
+                    "txtSenha"
+                ]
+                
+                for id_senha in ids_possiveis:
+                    try:
+                        campo_senha = self.driver.find_element(By.ID, id_senha)
+                        st.success(f"✅ Campo senha encontrado (ID: {id_senha})")
+                        break
+                    except:
+                        continue
+            
+            # Método 3: Por name
+            if not campo_senha:
+                try:
+                    campo_senha = self.driver.find_element(
+                        By.NAME, 
+                        "ctl00$ctl00$ctl00$ctl00$ContentPlaceHolderCorpo$ContentPlaceHolderCorpo$ContentPlaceHolderCorpo$ContentPlaceHolderCorpo$TextBoxSenha"
+                    )
+                    st.success("✅ Campo senha encontrado (por name)")
+                except:
+                    pass
+            
+            if not campo_senha:
+                st.error("❌ Campo de senha não encontrado após postback")
+                self._tirar_screenshot_debug("ERRO - Senha não encontrada")
+                
+                # Mostra todos os inputs da página para debug
+                if DEBUG_MODE:
+                    with st.expander("🔧 Campos INPUT disponíveis"):
+                        inputs = self.driver.find_elements(By.TAG_NAME, "input")
+                        for inp in inputs:
+                            tipo = inp.get_attribute('type')
+                            id_inp = inp.get_attribute('id')
+                            name_inp = inp.get_attribute('name')
+                            st.code(f"Type: {tipo} | ID: {id_inp} | Name: {name_inp}")
+                
                 return False
             
-            # Aguarda JavaScript da página carregar completamente
-            time.sleep(3)
+            # Aguarda campo estar visível e interativo
+            WebDriverWait(self.driver, 5).until(EC.visibility_of(campo_senha))
+            time.sleep(2)
             
             self._tirar_screenshot_debug("04 - Campo senha visível")
             
-            # Insere senha
+            # ============================================================
+            # ETAPA 4: INSERIR SENHA
+            # ============================================================
             st.info("🔑 Inserindo senha...")
             
             if not self._inserir_texto_seguro(campo_senha, senha):
@@ -236,7 +330,7 @@ class LoginManager:
             st.success(f"✅ Senha inserida ({tamanho} caracteres)")
             
             if tamanho == 0:
-                st.error("❌ Senha foi limpa - site pode estar bloqueando automação")
+                st.error("❌ Campo de senha está vazio")
                 self._tirar_screenshot_debug("ERRO - Senha vazia")
                 return False
             
@@ -244,99 +338,82 @@ class LoginManager:
             self._tirar_screenshot_debug("05 - Senha inserida")
             
             # ============================================================
-            # ETAPA 4: SUBMETER (VERSÃO MELHORADA)
+            # ETAPA 5: SUBMETER FORMULÁRIO
             # ============================================================
-            st.info("📤 Enviando formulário...")
+            st.info("📤 Enviando formulário de login...")
             
-            # Tenta múltiplas estratégias de submit
-            submit_sucesso = False
+            # Procura botão de login (após a senha)
+            botao_encontrado = False
             
-            # Estratégia 1: Procurar botão específico do segundo form
-            try:
-                # IDs possíveis para o botão de login (após inserir senha)
-                ids_botoes = [
-                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonLogin",
-                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnLogin",
-                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_Button1"
+            # IDs possíveis para o botão final de login
+            ids_botao_login = [
+                "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonLogin",
+                "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnEntrar",
+                "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_Button1",
+                "ButtonLogin",
+                "btnEntrar"
+            ]
+            
+            for btn_id in ids_botao_login:
+                try:
+                    btn_login = self.driver.find_element(By.ID, btn_id)
+                    st.info(f"🎯 Botão login encontrado: {btn_id}")
+                    
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", btn_login)
+                    time.sleep(0.5)
+                    
+                    try:
+                        btn_login.click()
+                    except:
+                        self.driver.execute_script("arguments[0].click();", btn_login)
+                    
+                    st.success("✅ Botão clicado")
+                    botao_encontrado = True
+                    break
+                except:
+                    continue
+            
+            # Tenta por XPath se não encontrou por ID
+            if not botao_encontrado:
+                xpaths_login = [
+                    "//input[@type='submit' and @value='Entrar']",
+                    "//input[@type='submit' and @value='Login']",
+                    "//button[@type='submit']",
+                    "//input[@type='submit' and contains(@id, 'Button')]"
                 ]
                 
-                for btn_id in ids_botoes:
+                for xpath in xpaths_login:
                     try:
-                        btn_login = self.driver.find_element(By.ID, btn_id)
-                        st.info(f"🎯 Botão encontrado: {btn_id}")
+                        btn = self.driver.find_element(By.XPATH, xpath)
+                        st.info(f"🎯 Botão encontrado via XPath")
                         
-                        # Scroll e clique
-                        self.driver.execute_script("arguments[0].scrollIntoView(true);", btn_login)
-                        time.sleep(0.5)
-                        self.driver.execute_script("arguments[0].click();", btn_login)
-                        
-                        submit_sucesso = True
+                        self.driver.execute_script("arguments[0].click();", btn)
                         st.success("✅ Botão clicado")
+                        botao_encontrado = True
                         break
                     except:
                         continue
-            except:
-                pass
             
-            # Estratégia 2: Procurar por XPath
-            if not submit_sucesso:
-                try:
-                    xpaths = [
-                        "//input[@type='submit' and contains(@id, 'Button')]",
-                        "//button[@type='submit']",
-                        "//input[@value='Entrar']",
-                        "//input[@value='Login']",
-                        "//button[contains(text(), 'Entrar')]"
-                    ]
-                    
-                    for xpath in xpaths:
-                        try:
-                            btn = self.driver.find_element(By.XPATH, xpath)
-                            st.info(f"🎯 Botão encontrado via XPath")
-                            
-                            self.driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-                            time.sleep(0.5)
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            
-                            submit_sucesso = True
-                            break
-                        except:
-                            continue
-                except:
-                    pass
-            
-            # Estratégia 3: Enter no campo de senha
-            if not submit_sucesso:
-                st.info("⌨️ Enviando ENTER no campo de senha...")
+            # Se não encontrou botão, usa ENTER
+            if not botao_encontrado:
+                st.info("⌨️ Enviando ENTER no campo de senha")
                 campo_senha.send_keys(Keys.RETURN)
-                submit_sucesso = True
             
-            # Estratégia 4: Submit via JavaScript no formulário
-            if not submit_sucesso:
-                try:
-                    st.info("🔧 Tentando submit via JavaScript...")
-                    self.driver.execute_script("""
-                        var forms = document.getElementsByTagName('form');
-                        if (forms.length > 0) {
-                            forms[0].submit();
-                        }
-                    """)
-                    submit_sucesso = True
-                except:
-                    pass
-            
-            # Aguarda processamento
+            # Aguarda processamento do login
+            st.info("⏳ Aguardando resposta do servidor...")
             time.sleep(5)
             
-            self._tirar_screenshot_debug("06 - Após submit")
+            self._aguardar_postback_aspnet(timeout=10)
+            
+            self._tirar_screenshot_debug("06 - Após login")
             
             # ============================================================
-            # ETAPA 5: VERIFICAR SUCESSO
+            # ETAPA 6: VERIFICAR SUCESSO
             # ============================================================
             st.info("🔍 Verificando autenticação...")
             
             try:
-                # Aguarda campo de consulta aparecer (sinal de sucesso)
+                # Aguarda aparecer o campo de consulta (página de sucesso)
                 campo_consulta = WebDriverWait(self.driver, 15).until(
                     EC.presence_of_element_located(
                         (By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")
@@ -351,32 +428,38 @@ class LoginManager:
                 st.error("❌ Falha na autenticação")
                 self._tirar_screenshot_debug("08 - FALHA LOGIN")
                 
-                # Diagnóstico
+                # Diagnóstico detalhado
                 try:
                     url_atual = self.driver.current_url
-                    st.warning(f"URL atual: {url_atual}")
+                    titulo = self.driver.title
+                    
+                    st.warning(f"**URL atual:** {url_atual}")
+                    st.warning(f"**Título:** {titulo}")
                     
                     page_source = self.driver.page_source.lower()
                     
                     if "incorreta" in page_source or "inválid" in page_source:
                         st.error("🚫 **Credenciais incorretas**")
                     elif "captcha" in page_source:
-                        st.error("🚫 **CAPTCHA detectado** - site pode estar bloqueando automação")
-                    elif url_atual == self.config.url_login or "login" in url_atual:
-                        st.error("🚫 **Permaneceu na tela de login** - formulário não foi submetido corretamente")
+                        st.error("🚫 **CAPTCHA detectado**")
+                    elif "senha" in page_source and ("obrigatório" in page_source or "vazio" in page_source):
+                        st.error("🚫 **Campo de senha não foi preenchido corretamente**")
+                    elif url_atual == self.config.url_login or "login" in url_atual.lower():
+                        st.error("🚫 **Permaneceu na página de login**")
                     else:
                         st.error("🚫 **Erro desconhecido**")
                     
                     if DEBUG_MODE:
-                        with st.expander("🔧 HTML da página (Debug)"):
-                            st.code(self.driver.page_source[:2000], language="html")
-                except:
-                    pass
+                        with st.expander("🔧 HTML da página (primeiros 3000 chars)"):
+                            st.code(self.driver.page_source[:3000], language="html")
+                
+                except Exception as diag_error:
+                    st.error(f"Erro no diagnóstico: {diag_error}")
                 
                 return False
         
         except Exception as e:
-            st.error(f"❌ Erro fatal: {e}")
+            st.error(f"❌ Erro fatal no login: {e}")
             self._tirar_screenshot_debug("ERRO FATAL")
             
             if DEBUG_MODE:

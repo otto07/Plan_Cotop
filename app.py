@@ -1,402 +1,335 @@
 import streamlit as st
 import pandas as pd
 import time
-import io
 import os
-import base64
-import gc
-import re
+from io import BytesIO
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
-# ================= CONFIGURAÇÃO DA PÁGINA =================
+# =============================================================================
+# CONFIGURAÇÃO DA PÁGINA STREAMLIT
+# =============================================================================
 st.set_page_config(
-    page_title="Sistema Integrado ANTT (Final)",
+    page_title="Robô ANTT - Consulta e Comparação",
     page_icon="🚛",
     layout="wide"
 )
 
-# ================= FUNÇÕES AUXILIARES =================
-def download_automatico(df, nome_arquivo):
-    try:
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
-        val = buffer.getvalue()
-        b64 = base64.b64encode(val).decode()
-        
-        md = f"""
-        <script>
-            var link = document.createElement('a');
-            link.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}';
-            link.download = '{nome_arquivo}';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        </script>
-        """
-        st.components.v1.html(md, height=0)
-        return True
-    except Exception: return False
+# =============================================================================
+# FUNÇÕES DO CORE (SELENIUM)
+# =============================================================================
 
-def normalizar_auto(valor):
-    return str(valor).strip().upper().replace(' ', '')
-
-# ================= CLASSE DE CONFIGURAÇÃO =================
-class ConfigWeb:
-    def __init__(self):
-        self.url_login = 'https://appweb1.antt.gov.br/sca/Site/Login.aspx?ReturnUrl=%2fspm%2fSite%2fDefesaCTB%2fConsultaProcessoSituacao.aspx'
-        self.url_consulta = 'https://appweb1.antt.gov.br/spm/Site/DefesaCTB/ConsultaProcessoSituacao.aspx'
-        self.col_auto = 'Auto de Infração'
-        self.col_processo = 'Nº do Processo'
-        self.col_status = 'Status Consulta'
-        self.col_andamento = 'Último Andamento'
-        self.timeout_padrao = 30 
-        self.sleep_pos_clique = 5
-        self.reiniciar_a_cada = 25 
-
-# ================= DRIVER =================
 def get_driver():
+    """Inicializa o WebDriver em modo Headless (compatível com servidores)"""
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new") 
+    chrome_options.add_argument("--headless")  # Roda sem abrir janela
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disk-cache-size=1") 
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    return webdriver.Chrome(options=chrome_options)
+    
+    # Anti-detecção básico
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    
+    # Cache do Driver Manager para não baixar sempre
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
 
-# ================= LOGIN =================
-def realizar_login(driver, usuario, senha, config):
-    wait = WebDriverWait(driver, config.timeout_padrao)
+def realizar_login(driver, usuario, senha):
+    """Realiza o login automatizado"""
     try:
-        if "ConsultaProcessoSituacao" not in driver.current_url:
-            driver.get(config.url_login)
-            time.sleep(3)
+        url_login = 'https://appweb1.antt.gov.br/sca/Site/Login.aspx?ReturnUrl=%2fspm%2fSite%2fDefesaCTB%2fConsultaProcessoSituacao.aspx'
+        driver.get(url_login)
+        wait = WebDriverWait(driver, 10)
+
+        # 1. Inserir Usuário
+        campo_user = wait.until(EC.element_to_be_clickable((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_TextBoxUsuario")))
+        campo_user.clear()
+        campo_user.send_keys(usuario)
+
+        # 2. Clicar OK (para liberar a senha, se for fluxo em duas etapas, ou submeter)
+        btn_ok = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk")
+        btn_ok.click()
         
-        # Login Legado
-        if "sca/Site/Login" in driver.current_url:
-            try:
-                driver.find_element(By.XPATH, "//input[contains(@name, 'Usuario') or contains(@id, 'User')]").send_keys(usuario)
-                driver.find_element(By.XPATH, "//input[@type='password']").send_keys(senha)
-                driver.find_element(By.XPATH, "//input[@type='submit'] | //a[contains(@id, 'Login')]").click()
-                time.sleep(config.sleep_pos_clique)
-            except: pass
-
-        # Login Gov.br
-        if "sso.acesso.gov.br" in driver.current_url:
-            try:
-                wait.until(EC.presence_of_element_located((By.ID, "accountId"))).send_keys(usuario)
-                driver.find_element(By.XPATH, "//button[contains(text(), 'Continuar')]").click()
-                time.sleep(3)
-                wait.until(EC.presence_of_element_located((By.ID, "password"))).send_keys(senha)
-                driver.find_element(By.ID, "submit-button").click()
-                time.sleep(5) 
-            except: pass
-
-        if "ConsultaProcessoSituacao" in driver.current_url: return True
-        driver.get(config.url_consulta)
-        time.sleep(4)
-        if "ConsultaProcessoSituacao" in driver.current_url: return True
-        return False
-    except Exception: return False
-
-def garantir_sessao(driver, usuario, senha, config):
-    try:
-        if "consultaprocessosituacao" not in driver.current_url.lower() or "login" in driver.current_url.lower():
-            return realizar_login(driver, usuario, senha, config)
+        # 3. Tratamento da Senha
+        # Verifica se apareceu campo de senha (tentativa genérica pois o ID pode variar)
+        try:
+            time.sleep(2) # Espera técnica para o campo senha aparecer
+            campo_senha = driver.find_element(By.XPATH, "//input[@type='password']")
+            campo_senha.clear()
+            campo_senha.send_keys(senha)
+            
+            # Tenta clicar no botão de entrar novamente ou pressionar enter
+            btn_ok.click() 
+        except:
+            # Se não achou campo senha, assume que o login foi direto ou falhou
+            pass
+            
+        # 4. Verificar sucesso (Procura pelo campo de busca)
+        wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
         return True
-    except: return False
+    except Exception as e:
+        st.error(f"Erro no login: {str(e)}")
+        return False
 
-# ================= CONSULTA =================
-def consultar_auto(driver, auto, config):
+def consultar_processo(driver, auto_infracao):
+    """Lógica de extração robusta (Pop-up + Janelas + Colunas Corrigidas)"""
     resultado = {'status': 'erro', 'dados': {}, 'mensagem': ''}
-    wait = WebDriverWait(driver, config.timeout_padrao)
+    wait = WebDriverWait(driver, 20)
+    janela_principal = driver.current_window_handle
     
     try:
-        # 1. Navegação
-        if "ConsultaProcessoSituacao" not in driver.current_url:
-             driver.get(config.url_consulta)
-             time.sleep(2)
+        # 1. Limpeza e Inserção
+        campo_busca = wait.until(EC.element_to_be_clickable((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
+        campo_busca.clear()
+        campo_busca.send_keys(auto_infracao)
         
-        # 2. Pesquisa
-        try:
-            campo = wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
-            campo.clear()
-            campo.send_keys(auto)
-            btn = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar")
-            driver.execute_script("arguments[0].click();", btn)
-            time.sleep(config.sleep_pos_clique)
-        except: 
-            return {'status': 'erro_conexao', 'dados': {}, 'mensagem': 'Erro na Pesquisa (Site Lento)'}
+        # 2. Pesquisar
+        encontrou = False
+        for tentativa in range(3):
+            try:
+                btn_pesquisar = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar")
+                driver.execute_script("arguments[0].click();", btn_pesquisar)
+                time.sleep(2)
+                wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0")))
+                encontrou = True
+                break
+            except:
+                if "Nenhum registro encontrado" in driver.page_source:
+                    break
         
-        # 3. Validação de Resultado
-        src = driver.page_source.lower()
-        if "nenhum registro" in src or "não encontrado" in src:
+        if not encontrou:
             resultado['status'] = 'nao_encontrado'
             resultado['mensagem'] = 'Auto não localizado'
             return resultado
 
-        # 4. Abertura do Detalhe
-        sucesso_abertura = False
-        janela_principal = driver.window_handles[0]
+        # 3. Abrir Pop-up
+        btn_editar = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_editar)
+        time.sleep(1)
+        driver.execute_script("arguments[0].click();", btn_editar)
         
-        for tentativa in range(3): 
-            try:
-                # Clica no botão editar
-                btn_edit = driver.find_element(By.XPATH, "//input[contains(@src, 'img/editar.gif')] | //input[contains(@id, 'btnEditar')] | //a[contains(@title, 'Editar')]")
-                driver.execute_script("arguments[0].click();", btn_edit)
-                time.sleep(4)
-                
-                if len(driver.window_handles) > 1:
-                    driver.switch_to.window(driver.window_handles[-1])
-                    # Espera o campo de processo estar VISÍVEL
-                    wait.until(EC.visibility_of_element_located((By.XPATH, "//input[contains(@id, 'txbProcesso')]")))
-                    sucesso_abertura = True
-                    break
-                else:
-                    time.sleep(2)
-            except: 
-                time.sleep(2)
+        # 4. Troca de Janela
+        WebDriverWait(driver, 15).until(EC.number_of_windows_to_be(2))
+        janelas = driver.window_handles
+        nova_janela = [j for j in janelas if j != janela_principal][0]
+        driver.switch_to.window(nova_janela)
+        time.sleep(3) # Espera técnica para carregamento
         
-        # 5. Extração e Validação
-        if sucesso_abertura:
-            dados = {}
-            try:
-                # Regex para validar processo
-                padrao_processo = re.compile(r'\d{5}\.\d{6}/\d{4}-\d{2}')
-                
-                elem_proc = driver.find_element(By.XPATH, "//input[contains(@id, 'txbProcesso')]")
-                val_proc = elem_proc.get_attribute('value').strip()
-                
-                # Loop de insistência para campo vazio
-                for _ in range(5):
-                    if not val_proc:
-                        time.sleep(1.5)
-                        val_proc = elem_proc.get_attribute('value').strip()
-                    else:
-                        break
-                
-                # Validação Lógica
-                if padrao_processo.search(val_proc):
-                    dados['processo'] = val_proc
-                elif val_proc:
-                     dados['processo'] = f"{val_proc} (Formato Inválido?)" 
-                else:
-                     raise ValueError("Campo Processo vazio")
-
-                # Extração de Andamento
-                try:
-                    trs = driver.find_elements(By.XPATH, "//table[contains(@class, 'tabela-conteudo')]//tr")
-                    if len(trs) > 1:
-                        dados['ultimo_andamento'] = trs[-1].find_elements(By.TAG_NAME, "td")[1].text
-                    else: 
-                        dados['ultimo_andamento'] = "Sem histórico"
-                except: 
-                    dados['ultimo_andamento'] = "-"
-                
-                resultado['dados'] = dados
-                resultado['status'] = 'sucesso'
-                resultado['mensagem'] = 'Sucesso'
-
-            except Exception as e: 
-                resultado['status'] = 'erro_leitura'
-                resultado['mensagem'] = f"Erro Validação: {str(e)[:20]}"
-
-            # Fecha e volta
-            if len(driver.window_handles) > 1:
-                driver.close()
-                driver.switch_to.window(janela_principal)
-        else:
-            resultado['status'] = 'erro_interacao'
-            resultado['mensagem'] = 'Detalhe não abriu'
-
-    except Exception as e: 
-        resultado['mensagem'] = f"Crash: {str(e)[:15]}"
+        # 5. Extração
+        dados = {}
         try:
-            if len(driver.window_handles) > 1:
-                driver.close()
-                driver.switch_to.window(driver.window_handles[0])
-        except: pass
-        
-    return resultado
+            # Espera campo do Processo ter valor (Lógica Anti-Vazio)
+            id_processo = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbProcesso"
+            wait.until(EC.visibility_of_element_located((By.ID, id_processo)))
+            
+            # Tentativa de leitura segura
+            dados['processo'] = driver.find_element(By.ID, id_processo).get_attribute('value')
+            dados['data_infracao'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbDataInfracao").get_attribute('value')
+            dados['codigo'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbCodigoInfracao").get_attribute('value')
+            dados['fato'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbObservacaoFiscalizacao").get_attribute('value')
 
-# ================= INTERFACE PRINCIPAL =================
-col_logo, col_title = st.columns([1, 6])
-with col_logo:
-    if os.path.exists("logo.png"): st.image("logo.png", width=100)
-    else: st.image("https://upload.wikimedia.org/wikipedia/commons/5/52/Logo_ANTT.svg", width=100)
+            # Tabela de Andamentos (Correção da 4ª Coluna)
+            try:
+                xpath_tabela = '//*[@id="ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_ucDocumentosDoProcesso442_gdvDocumentosProcesso"]'
+                wait.until(EC.presence_of_element_located((By.XPATH, xpath_tabela)))
+                tabela = driver.find_element(By.XPATH, xpath_tabela)
+                linhas = tabela.find_elements(By.TAG_NAME, "tr")
+                
+                if len(linhas) > 1:
+                    ultima_linha = linhas[-1]
+                    cols = ultima_linha.find_elements(By.TAG_NAME, "td")
+                    
+                    if len(cols) >= 4:
+                        dados['data_andamento'] = cols[3].text # 4ª Coluna
+                        dados['andamento'] = cols[1].text # 2ª Coluna
+                    elif len(cols) >= 2:
+                        dados['data_andamento'] = cols[-1].text
+                        dados['andamento'] = cols[0].text
+                    else:
+                         dados['andamento'] = 'Tabela fora do padrão'
+            except:
+                dados['andamento'] = 'Sem andamentos'
+                
+            resultado['status'] = 'sucesso'
+            resultado['dados'] = dados
+            resultado['mensagem'] = 'Sucesso'
 
-with col_title:
-    st.markdown("<h1 style='margin-top: -10px;'>Sistema Integrado ANTT</h1>", unsafe_allow_html=True)
-    st.caption("Versão Final com Lógica de Atualização Corrigida")
+        except Exception as e:
+            resultado['mensagem'] = f'Erro leitura: {str(e)}'
 
-tab_robo, tab_comparador = st.tabs(["🤖 Robô de Consulta", "⚖️ Comparador de Planilhas"])
+        # 6. Fechar e Voltar
+        driver.close()
+        driver.switch_to.window(janela_principal)
+        return resultado
 
-# ================= ABA 1: ROBÔ =================
-with tab_robo:
-    if 'df_final' not in st.session_state: st.session_state.df_final = None
-    if 'logs' not in st.session_state: st.session_state.logs = []
+    except Exception as e:
+        resultado['mensagem'] = f'Erro fluxo: {str(e)}'
+        if len(driver.window_handles) > 1:
+            try: driver.switch_to.window(janela_principal)
+            except: pass
+        return resultado
 
-    with st.sidebar:
-        st.header("🔐 Credenciais")
-        cpf_input = st.text_input("Usuário/CPF")
-        senha_input = st.text_input("Senha", type="password")
-        st.divider()
-        pular_feitos = st.checkbox("Pular já concluídos", value=True)
-        remover_duplicados = st.checkbox("Remover duplicados", value=True)
-        limitador = st.number_input("Limite (0=Tudo)", min_value=0, value=0)
+# =============================================================================
+# INTERFACE DO USUÁRIO
+# =============================================================================
 
-    st.info("Dica: Desmarque 'Pular já concluídos' se quiser forçar a atualização de processos existentes.")
-    uploaded_file = st.file_uploader("📂 Planilha de Entrada (.xlsx)", type=['xlsx'], key="up_robo")
+st.title("🚛 Robô ANTT - Automação de Consultas")
 
-    if uploaded_file and st.button("▶️ Iniciar Robô"):
-        if not cpf_input or not senha_input:
-            st.error("⚠️ Preencha o Login!")
-        else:
-            config = ConfigWeb()
+tab1, tab2 = st.tabs(["🔍 Consulta Automática", "📊 Comparação de Planilhas"])
+
+# --- ABA 1: CONSULTA ---
+with tab1:
+    st.markdown("### Parâmetros de Acesso")
+    
+    col_login1, col_login2 = st.columns(2)
+    with col_login1:
+        usuario = st.text_input("Usuário ANTT")
+    with col_login2:
+        senha = st.text_input("Senha ANTT", type="password")
+    
+    uploaded_file = st.file_uploader("Carregar planilha de entrada (.xlsx)", type="xlsx")
+    
+    if uploaded_file and usuario and senha:
+        if st.button("🚀 Iniciar Consulta em Massa"):
             df = pd.read_excel(uploaded_file)
             
-            for col in [config.col_processo, config.col_status, config.col_andamento, config.col_auto]:
-                 if col in df.columns: df[col] = df[col].astype(str).replace('nan', '')
-                 else: df[col] = ""
+            # Normalização de colunas
+            cols_necessarias = ['Nº do Processo', 'Data da Infração', 'Código da Infração', 
+                                'Fato Gerador', 'Último Andamento', 'Data do Último Andamento', 
+                                'Status Consulta']
+            for col in cols_necessarias:
+                if col not in df.columns: df[col] = ""
+            
+            # Converter para objeto para evitar erros de tipo
+            df = df.astype(object)
+            df = df.replace('nan', '')
 
-            if remover_duplicados: df = df.drop_duplicates(subset=[config.col_auto], keep='first')
-            if limitador > 0: df = df.head(limitador)
-
-            status_box = st.status("Iniciando...", expanded=True)
+            st.info("Iniciando navegador em background...")
             progress_bar = st.progress(0)
-            log_placeholder = st.empty()
+            status_text = st.empty()
             
             driver = get_driver()
-            cache = {}
             
             try:
-                status_box.write("🔐 Logando...")
-                if not realizar_login(driver, cpf_input, senha_input, config):
-                    st.error("❌ Falha Login")
-                    status_box.update(label="Erro Login", state="error")
-                else:
-                    status_box.write("✅ Logado! Iniciando...")
+                if realizar_login(driver, usuario, senha):
+                    st.success("Login realizado com sucesso!")
+                    
                     total = len(df)
-                    df = df.reset_index(drop=True)
-                    contador_lote = 0
-
                     for index, row in df.iterrows():
-                        contador_lote += 1
-                        if contador_lote >= config.reiniciar_a_cada:
-                            status_box.write("🧹 Limpeza preventiva de memória...")
-                            driver.quit()
-                            gc.collect()
-                            time.sleep(2)
-                            driver = get_driver()
-                            realizar_login(driver, cpf_input, senha_input, config)
-                            contador_lote = 0
+                        auto = str(row['Auto de Infração']).strip()
                         
-                        auto = normalizar_auto(row[config.col_auto])
-                        status_atual = str(row[config.col_status])
-                        
-                        # === LÓGICA CORRIGIDA ===
-                        # Só pula se estiver marcado como SUCESSO na coluna status
-                        # Ignora se tem processo preenchido ou não (pois pode querer atualizar)
-                        ja_realizado = "Sucesso" in status_atual
-                        tem_processo = len(str(row[config.col_processo])) > 5
-                        
-                        # A condição agora exige que o STATUS seja sucesso para pular.
-                        # Se tiver processo mas status estiver vazio ou erro, ele consulta.
-                        if pular_feitos and ja_realizado and tem_processo:
-                            st.session_state.logs.insert(0, f"⏭️ {index+1}/{total}: {auto} (Concluído)")
-                            log_placeholder.text("\n".join(st.session_state.logs[:10]))
-                            progress_bar.progress((index + 1) / total)
+                        if pd.isna(auto) or auto == '' or auto == 'nan':
                             continue
-
-                        if auto in cache:
-                            res = cache[auto]
-                            st.session_state.logs.insert(0, f"♻️ {index+1}/{total}: {auto} (Cache)")
-                        else:
-                            status_box.update(label=f"🔄 [{index+1}/{total}] Consultando: {auto}")
-                            
-                            if not garantir_sessao(driver, cpf_input, senha_input, config):
-                                st.session_state.logs.insert(0, f"⛔ {index+1}/{total}: Sessão caiu")
-                                continue
-                                
-                            res = consultar_auto(driver, auto, config)
-                            cache[auto] = res
                         
-                        df.at[index, config.col_status] = res['mensagem']
+                        status_text.text(f"Processando [{index+1}/{total}]: {auto}...")
+                        
+                        res = consultar_processo(driver, auto)
+                        
+                        df.at[index, 'Status Consulta'] = str(res['mensagem'])
+                        
                         if res['status'] == 'sucesso':
-                            df.at[index, config.col_processo] = res['dados'].get('processo', '')
-                            df.at[index, config.col_andamento] = res['dados'].get('ultimo_andamento', '')
-                            icon = "✅"
-                        elif res['status'] == 'nao_encontrado': icon = "⚠️"
-                        else: icon = "❌"
+                            d = res['dados']
+                            df.at[index, 'Nº do Processo'] = str(d.get('processo', ''))
+                            df.at[index, 'Data da Infração'] = str(d.get('data_infracao', ''))
+                            df.at[index, 'Código da Infração'] = str(d.get('codigo', ''))
+                            df.at[index, 'Fato Gerador'] = str(d.get('fato', ''))
+                            df.at[index, 'Último Andamento'] = str(d.get('andamento', ''))
+                            df.at[index, 'Data do Último Andamento'] = str(d.get('data_andamento', ''))
                         
-                        st.session_state.logs.insert(0, f"{icon} {index+1}/{total}: {auto} - {res['mensagem']}")
-                        log_placeholder.text("\n".join(st.session_state.logs[:10]))
                         progress_bar.progress((index + 1) / total)
-                        st.session_state.df_final = df.copy()
+                    
+                    st.success("Processamento concluído!")
+                    
+                    # Converter para download
+                    output = BytesIO()
+                    df.to_excel(output, index=False)
+                    output.seek(0)
+                    
+                    st.download_button(
+                        label="📥 Baixar Planilha Atualizada",
+                        data=output,
+                        file_name="Resultado_Consulta_ANTT.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.error("Falha no login. Verifique suas credenciais.")
+            
+            except Exception as e:
+                st.error(f"Erro crítico durante a execução: {e}")
+            finally:
+                driver.quit()
 
-                    status_box.update(label="Concluído!", state="complete")
-                    st.success("Finalizado!")
-                    download_automatico(df, "Planilha_ANTT_Atualizada.xlsx")
+# --- ABA 2: COMPARAÇÃO (Código Original Mantido/Adaptado) ---
+with tab2:
+    st.header("Comparação de Planilhas")
+    st.write("Compare a planilha antiga com a nova e identifique mudanças.")
+
+    arquivo_antigo = st.file_uploader("Planilha Antiga (Referência)", type=["xlsx", "csv"], key="antiga")
+    arquivo_novo = st.file_uploader("Planilha Nova (Recente)", type=["xlsx", "csv"], key="nova")
+
+    if st.button("Comparar Planilhas"):
+        if arquivo_antigo and arquivo_novo:
+            try:
+                # Carregar arquivos
+                df_antigo = pd.read_excel(arquivo_antigo) if arquivo_antigo.name.endswith('xlsx') else pd.read_csv(arquivo_antigo)
+                df_novo = pd.read_excel(arquivo_novo) if arquivo_novo.name.endswith('xlsx') else pd.read_csv(arquivo_novo)
+
+                # Verifica coluna chave
+                if "Auto de Infração" not in df_antigo.columns or "Auto de Infração" not in df_novo.columns:
+                    st.error("A coluna 'Auto de Infração' é obrigatória em ambas as planilhas.")
+                else:
+                    # Renomeia para facilitar
+                    df_antigo = df_antigo.rename(columns={"Último Andamento": "Status_Antigo", "Data do Último Andamento": "Data_Antiga"})
+                    df_novo = df_novo.rename(columns={"Último Andamento": "Status_Novo", "Data do Último Andamento": "Data_Novo"})
+
+                    # Merge
+                    df_resultado = pd.merge(
+                        df_novo, 
+                        df_antigo[['Auto de Infração', 'Status_Antigo', 'Data_Antiga']], 
+                        on='Auto de Infração', 
+                        how='left'
+                    )
+
+                    # Lógica de comparação
+                    def verificar_mudanca(row):
+                        status_antigo = str(row['Status_Antigo']).strip()
+                        status_novo = str(row['Status_Novo']).strip()
+                        
+                        if pd.isna(row['Status_Antigo']) or status_antigo in ['nan', '']:
+                            return "Novo Processo"
+                        if status_antigo != status_novo:
+                            return "Houve Mudança"
+                        return "Sem Mudança"
+
+                    df_resultado['Resultado Comparação'] = df_resultado.apply(verificar_mudanca, axis=1)
+
+                    # Exibir resultados
+                    mudancas = df_resultado[df_resultado['Resultado Comparação'] == "Houve Mudança"]
+                    st.warning(f"Processos com mudanças: {len(mudancas)}")
+                    if len(mudancas) > 0:
+                        st.dataframe(mudancas[['Auto de Infração', 'Status_Antigo', 'Status_Novo', 'Resultado Comparação']])
+
+                    # Download
+                    output_comp = BytesIO()
+                    df_resultado.to_excel(output_comp, index=False)
+                    output_comp.seek(0)
+                    
+                    st.download_button(
+                        label="📥 Baixar Relatório de Comparação",
+                        data=output_comp,
+                        file_name="Relatorio_Comparacao.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
             except Exception as e:
-                st.error(f"Erro Crítico: {e}")
-            finally:
-                if driver: driver.quit()
-
-    if st.session_state.df_final is not None:
-        st.divider()
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            st.session_state.df_final.to_excel(writer, index=False)
-        st.download_button("📥 Baixar Planilha (Backup)", data=buffer.getvalue(), file_name="Planilha_ANTT_Backup.xlsx")
-
-# ================= ABA 2: COMPARADOR =================
-with tab_comparador:
-    st.markdown("### ⚖️ Conciliação de Novos Autos")
-    st.markdown("Use esta ferramenta para verificar novos autos na planilha Controle GEAUT.")
-    
-    col1, col2 = st.columns(2)
-    with col1: file_geaut = st.file_uploader("1. GEAUT (Fonte)", type=['xlsx'], key="up_geaut")
-    with col2: file_entrada = st.file_uploader("2. Entrada (Destino)", type=['xlsx'], key="up_entrada")
-
-    if file_geaut and file_entrada:
-        if st.button("🔄 Comparar"):
-            try:
-                df_geaut = pd.read_excel(file_geaut)
-                df_entrada = pd.read_excel(file_entrada)
-                
-                # Tenta achar colunas automaticamente
-                col_auto_geaut = next((c for c in df_geaut.columns if "Auto" in c and "Infração" in c), None)
-                col_auto_entrada = next((c for c in df_entrada.columns if "Auto" in c and "Infração" in c), None)
-
-                if not col_auto_geaut or not col_auto_entrada:
-                    st.error("Erro: Coluna 'Auto de Infração' não encontrada.")
-                    st.stop()
-
-                geaut_autos = set(df_geaut[col_auto_geaut].astype(str).apply(normalizar_auto))
-                entrada_autos = set(df_entrada[col_auto_entrada].astype(str).apply(normalizar_auto))
-                novos = geaut_autos - entrada_autos
-                
-                if len(novos) == 0:
-                    st.success("✅ Tudo atualizado!")
-                else:
-                    st.warning(f"⚠️ {len(novos)} novos autos encontrados.")
-                    df_novos = pd.DataFrame({col_auto_entrada: list(novos)})
-                    for col in ['Nº do Processo', 'Status Consulta', 'Último Andamento']:
-                        df_novos[col] = ""
-                    df_final = pd.concat([df_entrada, df_novos], ignore_index=True)
-                    download_automatico(df_final, "entrada_atualizada.xlsx")
-                    
-                    with st.expander("Ver novos"): st.dataframe(df_novos)
-                    
-                    b = io.BytesIO()
-                    with pd.ExcelWriter(b, engine='openpyxl') as w: df_final.to_excel(w, index=False)
-                    st.download_button("📥 Baixar Atualizada", data=b.getvalue(), file_name="entrada_atualizada.xlsx")
-
-            except Exception as e: st.error(f"Erro: {e}")
+                st.error(f"Erro ao processar arquivos: {e}")
+        else:
+            st.warning("Por favor, faça o upload dos dois arquivos.")

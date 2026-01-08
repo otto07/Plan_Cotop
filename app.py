@@ -5,6 +5,7 @@ import os
 from io import BytesIO
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys  # <--- IMPORTANTE
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -16,88 +17,106 @@ from selenium.webdriver.chrome.service import Service
 st.set_page_config(page_title="Robô ANTT - Cloud Pro", page_icon="🚛", layout="wide")
 
 # =============================================================================
-# FUNÇÕES CORE (SELENIUM BLINDADO PARA LINUX)
+# SETUP DO DRIVER (LINUX/CLOUD)
 # =============================================================================
 
 def get_driver():
-    """Configuração para rodar EXCLUSIVAMENTE no Streamlit Cloud (Linux)"""
+    """Configuração para rodar no Streamlit Cloud usando binários do sistema"""
     chrome_options = Options()
     
-    # --- CAMINHO DO BINÁRIO DO CHROME (INSTALADO VIA PACKAGES.TXT) ---
+    # Aponta para os binários instalados pelo packages.txt
     chrome_options.binary_location = "/usr/bin/chromium"
     
-    # --- ARGUMENTOS VITAIS PARA DOCKER/LINUX ---
+    # Flags vitais para ambiente Container/Linux
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage") # Evita crash de memória
+    chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    # --- ANTI-BLOQUEIO ---
+    # Anti-detecção
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36")
 
-    # --- CAMINHO DO DRIVER (INSTALADO VIA PACKAGES.TXT) ---
     try:
+        # Usa o driver do sistema
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=chrome_options)
         return driver
     except Exception as e:
-        # Fallback para tentativa local (caso você rode no Windows para testar)
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-            return driver
-        except:
-            st.error(f"Erro fatal ao iniciar driver: {e}")
-            raise e
+        st.error(f"Erro ao iniciar o driver: {e}")
+        st.stop()
 
-def realizar_login(driver, usuario, senha):
-    """Login com tratamento de erro visual (Screenshot)"""
+# =============================================================================
+# FUNÇÕES DE NEGÓCIO
+# =============================================================================
+
+def realizar_login_agressivo(driver, usuario, senha):
+    """
+    Login com injeção de JS para garantir que a senha seja lida
+    """
     try:
         url_login = 'https://appweb1.antt.gov.br/sca/Site/Login.aspx?ReturnUrl=%2fspm%2fSite%2fDefesaCTB%2fConsultaProcessoSituacao.aspx'
         driver.get(url_login)
         wait = WebDriverWait(driver, 20)
 
-        # 1. Usuário
+        # 1. Inserir Usuário
         id_user = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_TextBoxUsuario"
         campo_user = wait.until(EC.element_to_be_clickable((By.ID, id_user)))
         campo_user.clear()
         campo_user.send_keys(usuario)
 
-        # 2. Botão OK
+        # 2. Clicar OK (Primeira etapa)
         id_btn_ok = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk"
         btn_ok = driver.find_element(By.ID, id_btn_ok)
         btn_ok.click()
         
-        # 3. Senha (se houver)
+        # 3. Tratamento da Senha (AQUI ESTÁ A CORREÇÃO)
         try:
-            time.sleep(3)
-            # Verifica se apareceu campo de senha
-            campo_senha = driver.find_element(By.XPATH, "//input[@type='password']")
-            if campo_senha.is_displayed():
-                campo_senha.clear()
-                campo_senha.send_keys(senha)
-                btn_ok.click()
-        except:
+            # Espera o campo de senha aparecer (pode demorar pelo postback)
+            xpath_senha = "//input[@type='password']"
+            wait.until(EC.visibility_of_element_located((By.XPATH, xpath_senha)))
+            
+            # Pausa técnica para o ASP.NET carregar os scripts da página
+            time.sleep(2)
+            
+            campo_senha = driver.find_element(By.XPATH, xpath_senha)
+            
+            # A) Digitação normal
+            campo_senha.click()
+            campo_senha.clear()
+            campo_senha.send_keys(senha)
+            
+            # B) FORÇA BRUTA: Injeta o valor via JavaScript (caso o send_keys falhe no headless)
+            driver.execute_script(f"arguments[0].value = '{senha}';", campo_senha)
+            
+            # C) Dispara eventos para acordar o validador do site
+            driver.execute_script("arguments[0].dispatchEvent(new Event('change'));", campo_senha)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input'));", campo_senha)
+            
+            time.sleep(0.5)
+            
+            # D) Envia ENTER direto no campo (evita clicar em botão que pode estar travado)
+            campo_senha.send_keys(Keys.RETURN)
+            
+        except Exception as e:
+            # Se cair aqui, pode ser que o login foi direto sem senha ou erro de timeout
             pass
             
-        # 4. Confirmação
+        # 4. Confirmação de Sucesso
         wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
         return True
 
     except Exception as e:
-        st.error(f"Erro no Login: {e}")
-        # Tira print da tela para debug
+        st.error(f"Falha no Login: {e}")
+        # Debug visual em caso de erro
         try:
-            st.image(driver.get_screenshot_as_png(), caption="Tela do Erro no Login")
+            st.image(driver.get_screenshot_as_png(), caption="Erro no Login")
         except:
             pass
         return False
 
 def esperar_dados(driver, element_id, timeout=10):
-    """Espera dados aparecerem no campo"""
+    """Espera o dado aparecer no campo"""
     end_time = time.time() + timeout
     while time.time() < end_time:
         try:
@@ -108,7 +127,7 @@ def esperar_dados(driver, element_id, timeout=10):
     return ""
 
 def processar_auto(driver, auto):
-    """Lógica principal de extração"""
+    """Lógica de extração mantendo o que funcionava"""
     res = {'status': 'erro', 'dados': {}, 'mensagem': ''}
     wait = WebDriverWait(driver, 20)
     janela_main = driver.current_window_handle
@@ -119,7 +138,7 @@ def processar_auto(driver, auto):
         campo.clear()
         campo.send_keys(auto)
         
-        # 2. Pesquisar (Retry)
+        # 2. Pesquisar (Retry + JS Click)
         encontrou = False
         for _ in range(3):
             try:
@@ -148,7 +167,7 @@ def processar_auto(driver, auto):
         for w in driver.window_handles:
             if w != janela_main: driver.switch_to.window(w)
         
-        time.sleep(3) # Pausa técnica vital
+        time.sleep(3) # Pausa técnica
         
         # 5. Extrair
         dados = {}
@@ -163,7 +182,7 @@ def processar_auto(driver, auto):
             dados['codigo'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbCodigoInfracao").get_attribute('value')
             dados['fato'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbObservacaoFiscalizacao").get_attribute('value')
 
-            # Tabela
+            # Tabela (Coluna 4 -> Index 3)
             try:
                 xp = '//*[@id="ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_ucDocumentosDoProcesso442_gdvDocumentosProcesso"]'
                 wait.until(EC.presence_of_element_located((By.XPATH, xp)))
@@ -202,108 +221,58 @@ def processar_auto(driver, auto):
 # =============================================================================
 st.title("🚛 Robô ANTT - Nuvem Pro")
 
-tab1, tab2 = st.tabs(["🔍 Consulta Automática", "📊 Comparação de Planilhas"])
+usuario = st.text_input("Usuário ANTT")
+senha = st.text_input("Senha ANTT", type="password")
+arquivo = st.file_uploader("Upload Planilha (.xlsx)", type="xlsx")
 
-# --- ABA 1 ---
-with tab1:
-    col1, col2 = st.columns(2)
-    with col1:
-        usuario = st.text_input("Usuário ANTT")
-    with col2:
-        senha = st.text_input("Senha ANTT", type="password")
+if st.button("Iniciar") and arquivo and usuario:
+    try:
+        df = pd.read_excel(arquivo)
+        cols = ['Nº do Processo', 'Data da Infração', 'Código da Infração', 
+                'Fato Gerador', 'Último Andamento', 'Data do Último Andamento', 'Status Consulta']
+        for c in cols:
+            if c not in df.columns: df[c] = ""
+        df = df.astype(object).replace('nan', '')
 
-    arquivo = st.file_uploader("Upload Planilha (.xlsx)", type="xlsx")
-
-    if st.button("Iniciar") and arquivo and usuario:
-        try:
-            df = pd.read_excel(arquivo)
-            cols = ['Nº do Processo', 'Data da Infração', 'Código da Infração', 
-                    'Fato Gerador', 'Último Andamento', 'Data do Último Andamento', 'Status Consulta']
-            for c in cols:
-                if c not in df.columns: df[c] = ""
-            df = df.astype(object).replace('nan', '')
-
-            st.info("Iniciando navegador Linux...")
+        st.info("Iniciando navegador...")
+        
+        driver = get_driver()
+        
+        if realizar_login_agressivo(driver, usuario, senha):
+            st.success("Login efetuado!")
+            bar = st.progress(0)
+            txt = st.empty()
+            preview = st.empty()
             
-            # --- TENTATIVA DE INICIALIZAÇÃO SEGURA ---
-            try:
-                driver = get_driver()
-            except Exception as e:
-                st.error("Erro ao iniciar Chromium. Verifique se 'packages.txt' está no GitHub.")
-                st.stop()
-
-            if realizar_login(driver, usuario, senha):
-                st.success("Login efetuado!")
-                bar = st.progress(0)
-                txt = st.empty()
-                preview = st.empty()
+            total = len(df)
+            for idx, row in df.iterrows():
+                auto = str(row['Auto de Infração']).strip()
+                if not auto or auto == 'nan': continue
                 
-                total = len(df)
-                for idx, row in df.iterrows():
-                    auto = str(row['Auto de Infração']).strip()
-                    if not auto or auto == 'nan': continue
-                    
-                    txt.text(f"Consultando {idx+1}/{total}: {auto}")
-                    res = processar_auto(driver, auto)
-                    
-                    df.at[idx, 'Status Consulta'] = str(res['mensagem'])
-                    if res['status'] == 'sucesso':
-                        d = res['dados']
-                        df.at[idx, 'Nº do Processo'] = str(d.get('processo', ''))
-                        df.at[idx, 'Data da Infração'] = str(d.get('data_infracao', ''))
-                        df.at[idx, 'Código da Infração'] = str(d.get('codigo', ''))
-                        df.at[idx, 'Fato Gerador'] = str(d.get('fato', ''))
-                        df.at[idx, 'Último Andamento'] = str(d.get('andamento', ''))
-                        df.at[idx, 'Data do Último Andamento'] = str(d.get('data_andamento', ''))
-                    
-                    bar.progress((idx+1)/total)
-                    preview.dataframe(df.head(idx+1))
+                txt.text(f"Consultando {idx+1}/{total}: {auto}")
+                res = processar_auto(driver, auto)
                 
-                output = BytesIO()
-                df.to_excel(output, index=False)
-                output.seek(0)
-                st.download_button("📥 Baixar Resultado", data=output, file_name="Resultado_ANTT.xlsx")
+                df.at[idx, 'Status Consulta'] = str(res['mensagem'])
+                if res['status'] == 'sucesso':
+                    d = res['dados']
+                    df.at[idx, 'Nº do Processo'] = str(d.get('processo', ''))
+                    df.at[idx, 'Data da Infração'] = str(d.get('data_infracao', ''))
+                    df.at[idx, 'Código da Infração'] = str(d.get('codigo', ''))
+                    df.at[idx, 'Fato Gerador'] = str(d.get('fato', ''))
+                    df.at[idx, 'Último Andamento'] = str(d.get('andamento', ''))
+                    df.at[idx, 'Data do Último Andamento'] = str(d.get('data_andamento', ''))
                 
-            else:
-                st.warning("Não foi possível logar. Veja o print do erro acima.")
+                bar.progress((idx+1)/total)
+                preview.dataframe(df.head(idx+1))
             
-            driver.quit()
-        except Exception as e:
-            st.error(f"Erro Crítico: {e}")
-
-# --- ABA 2 ---
-with tab2:
-    col_a, col_b = st.columns(2)
-    with col_a: f_antigo = st.file_uploader("Planilha Antiga", type=["xlsx"], key="ant")
-    with col_b: f_novo = st.file_uploader("Planilha Nova", type=["xlsx"], key="nov")
-
-    if st.button("Comparar") and f_antigo and f_novo:
-        try:
-            df_old = pd.read_excel(f_antigo)
-            df_new = pd.read_excel(f_novo)
+            output = BytesIO()
+            df.to_excel(output, index=False)
+            output.seek(0)
+            st.download_button("📥 Baixar Resultado", data=output, file_name="Resultado_ANTT.xlsx")
             
-            if "Auto de Infração" in df_old.columns and "Auto de Infração" in df_new.columns:
-                df_old = df_old.rename(columns={"Último Andamento": "Status_Ant", "Data do Último Andamento": "Data_Ant"})
-                df_new = df_new.rename(columns={"Último Andamento": "Status_Nov", "Data do Último Andamento": "Data_Nov"})
-                
-                df_res = pd.merge(df_new, df_old[['Auto de Infração', 'Status_Ant', 'Data_Ant']], on='Auto de Infração', how='left')
-                
-                def check_change(row):
-                    s1, s2 = str(row['Status_Ant']).strip(), str(row['Status_Nov']).strip()
-                    if pd.isna(row['Status_Ant']) or s1 in ['nan', '']: return "Novo"
-                    return "Mudou" if s1 != s2 else "Igual"
-
-                df_res['Resultado'] = df_res.apply(check_change, axis=1)
-                mudancas = df_res[df_res['Resultado'] == "Mudou"]
-                
-                st.metric("Processos alterados", len(mudancas))
-                st.dataframe(mudancas)
-                
-                b = BytesIO()
-                df_res.to_excel(b, index=False)
-                b.seek(0)
-                st.download_button("📥 Baixar Relatório", data=b, file_name="Relatorio_Comparacao.xlsx")
-            else:
-                st.error("Coluna 'Auto de Infração' não encontrada.")
-        except Exception as e:
-            st.error(f"Erro: {e}")
+        else:
+            st.warning("Não foi possível logar. O site não aceitou a senha.")
+        
+        driver.quit()
+    except Exception as e:
+        st.error(f"Erro Crítico: {e}")

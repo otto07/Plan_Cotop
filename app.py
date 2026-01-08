@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import time
-import traceback
+import os
+import shutil
 from io import BytesIO
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -11,65 +12,68 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 # =============================================================================
-# CONFIGURAÇÃO GERAL
+# CONFIGURAÇÃO VISUAL
 # =============================================================================
-st.set_page_config(page_title="Robô ANTT - Blindado", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Robô ANTT - Logs", page_icon="⚙️", layout="wide")
 
-# Área de logs na interface
 if 'logs' not in st.session_state:
     st.session_state.logs = []
 
 def log_message(msg):
-    """Função para adicionar mensagens ao log visual"""
+    """Adiciona mensagem ao log visual e ao console"""
     timestamp = time.strftime("%H:%M:%S")
     formatted_msg = f"[{timestamp}] {msg}"
-    print(formatted_msg) # Log no console do servidor
+    print(formatted_msg)
     st.session_state.logs.append(formatted_msg)
-    # Mantém apenas os últimos 10 logs na tela para economizar memória visual
-    if len(st.session_state.logs) > 10:
-        st.session_state.logs.pop(0)
 
 # =============================================================================
-# SETUP DO DRIVER (LINUX/CLOUD)
+# SETUP DO DRIVER (AUTO-DETECÇÃO)
 # =============================================================================
 def get_driver():
+    """Configuração híbrida: Tenta usar o do sistema, se falhar, usa o Manager"""
     chrome_options = Options()
-    chrome_options.binary_location = "/usr/bin/chromium"
+    
+    # 1. Tenta encontrar onde o Chromium está instalado no Linux
+    chrome_bin = shutil.which("chromium") or shutil.which("chromium-browser") or "/usr/bin/chromium"
+    log_message(f"Binário do Chrome detectado em: {chrome_bin}")
+    
+    chrome_options.binary_location = chrome_bin
     chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage") # Vital para não estourar memória
+    chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
 
+    # TENTATIVA 1: Usar o driver do sistema (instalado via packages.txt)
     try:
+        log_message("Tentando iniciar driver do sistema...")
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        log_message("Driver do sistema iniciado com sucesso!")
         return driver
-    except Exception as e:
-        # Fallback caso o path seja diferente
-        return webdriver.Chrome(options=chrome_options)
+    except Exception as e1:
+        log_message(f"Driver do sistema falhou ({e1}). Tentando Webdriver Manager...")
+        
+        # TENTATIVA 2: Baixar um driver compatível automaticamente
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            log_message("Driver do Manager iniciado com sucesso!")
+            return driver
+        except Exception as e2:
+            st.error(f"FATAL: Não foi possível iniciar nenhum navegador. Erro: {e2}")
+            raise e2
 
 # =============================================================================
-# FUNÇÕES DE LOGIN E VERIFICAÇÃO DE SESSÃO
+# LÓGICA DE NEGÓCIO (LOGIN E EXTRAÇÃO)
 # =============================================================================
 
-def verificar_sessao_ativa(driver):
-    """Verifica se o usuário ainda está logado procurando o campo de busca"""
-    try:
-        # Tenta achar o campo de busca com timeout curto (3s)
-        WebDriverWait(driver, 3).until(
-            EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao"))
-        )
-        return True
-    except:
-        return False
-
-def realizar_login(driver, usuario, senha):
-    """Faz o login (ou relogin) no sistema"""
-    log_message("Tentando realizar login...")
+def realizar_login_robusto(driver, usuario, senha):
+    log_message("Acessando página de login...")
     try:
         url_login = 'https://appweb1.antt.gov.br/sca/Site/Login.aspx?ReturnUrl=%2fspm%2fSite%2fDefesaCTB%2fConsultaProcessoSituacao.aspx'
         driver.get(url_login)
@@ -86,114 +90,98 @@ def realizar_login(driver, usuario, senha):
         # 2. OK Inicial
         driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk").click()
         
-        time.sleep(3) # Espera postback
+        log_message("Aguardando recarregamento da página (3s)...")
+        time.sleep(3) 
 
-        # 3. Senha (se pedir)
+        # 3. Senha (Injeção JS + ActionChains)
         try:
             xpath_senha = "//input[@type='password']"
-            wait.until(EC.visibility_of_element_located((By.XPATH, xpath_senha)))
-            campo_senha = driver.find_element(By.XPATH, xpath_senha)
-            
-            actions.move_to_element(campo_senha).click().perform()
-            campo_senha.clear()
-            campo_senha.send_keys(senha)
-            time.sleep(1)
-            campo_senha.send_keys(Keys.RETURN)
-        except:
-            pass # Pode ser login sem senha
+            if len(driver.find_elements(By.XPATH, xpath_senha)) > 0:
+                campo_senha = driver.find_element(By.XPATH, xpath_senha)
+                
+                # Clica e Digita
+                actions.move_to_element(campo_senha).click().perform()
+                campo_senha.clear()
+                campo_senha.send_keys(senha)
+                
+                # Garante valor via JS
+                driver.execute_script(f"arguments[0].value = '{senha}';", campo_senha)
+                
+                time.sleep(0.5)
+                campo_senha.send_keys(Keys.RETURN)
+        except Exception as e:
+            log_message(f"Aviso no campo senha: {e}")
 
         # 4. Validação
-        if verificar_sessao_ativa(driver):
-            log_message("Login realizado com sucesso!")
-            return True
-        else:
-            log_message("Falha: Login não detectado após tentativas.")
-            return False
+        log_message("Validando acesso...")
+        wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
+        return True
 
     except Exception as e:
-        log_message(f"Erro crítico no login: {e}")
+        log_message(f"Erro no Login: {e}")
         return False
-
-# =============================================================================
-# FUNÇÕES DE EXTRAÇÃO
-# =============================================================================
-
-def esperar_valor_campo(driver, element_id, timeout=8):
-    """Espera inteligente para valor do campo"""
-    end = time.time() + timeout
-    while time.time() < end:
-        try:
-            val = driver.find_element(By.ID, element_id).get_attribute('value')
-            if val and val.strip(): return val
-        except: pass
-        time.sleep(0.5)
-    return ""
 
 def consultar_auto(driver, auto):
     res = {'status': 'erro', 'dados': {}, 'mensagem': ''}
-    wait = WebDriverWait(driver, 15) # Timeout reduzido para não travar muito
+    wait = WebDriverWait(driver, 15)
     janela_main = driver.current_window_handle
     
     try:
-        # 1. Tenta Limpar e Inserir
+        # Busca
         try:
             campo = wait.until(EC.element_to_be_clickable((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")))
             campo.clear()
             campo.send_keys(auto)
         except:
-            # Se falhar aqui, provavelmente a sessão caiu
-            raise Exception("Sessão Expirada")
+            raise Exception("Sessão Queda") # Gatilho para relogin
 
-        # 2. Pesquisar
+        # Pesquisar
         encontrou = False
-        for _ in range(2): # 2 Tentativas
+        for _ in range(2):
             try:
                 btn = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar")
                 driver.execute_script("arguments[0].click();", btn)
                 time.sleep(2)
-                
-                # Verifica botão editar OU mensagem de erro
-                if "Nenhum registro" in driver.page_source:
-                    break
-                
+                if "Nenhum registro" in driver.page_source: break
                 wait.until(EC.presence_of_element_located((By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0")))
                 encontrou = True
                 break
-            except:
-                time.sleep(1)
+            except: time.sleep(1)
         
         if not encontrou:
             res['status'] = 'nao_encontrado'
             res['mensagem'] = 'Auto não localizado'
             return res
 
-        # 3. Abrir Popup
+        # Popup
         btn_edit = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0")
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_edit)
         time.sleep(1)
         driver.execute_script("arguments[0].click();", btn_edit)
         
-        # 4. Janelas
+        # Janelas
         WebDriverWait(driver, 10).until(EC.number_of_windows_to_be(2))
         for w in driver.window_handles:
             if w != janela_main: driver.switch_to.window(w)
         
-        time.sleep(2.5) # Pausa para carregamento dos dados
+        time.sleep(2) 
         
-        # 5. Extração
+        # Extração
         d = {}
         try:
             id_proc = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbProcesso"
             wait.until(EC.visibility_of_element_located((By.ID, id_proc)))
             
-            d['processo'] = esperar_valor_campo(driver, id_proc)
-            if not d['processo']: d['processo'] = driver.find_element(By.ID, id_proc).get_attribute('value')
+            # Helper para pegar valor
+            def get_val(id_elem):
+                try: return driver.find_element(By.ID, id_elem).get_attribute('value')
+                except: return ""
 
-            d['data_inf'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbDataInfracao").get_attribute('value')
-            d['codigo'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbCodigoInfracao").get_attribute('value')
-            d['fato'] = driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbObservacaoFiscalizacao").get_attribute('value')
+            d['processo'] = get_val(id_proc)
+            d['data_inf'] = get_val("ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbDataInfracao")
+            d['codigo'] = get_val("ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbCodigoInfracao")
+            d['fato'] = get_val("ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbObservacaoFiscalizacao")
 
-            # Tabela
             try:
                 xp = '//*[@id="ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_ucDocumentosDoProcesso442_gdvDocumentosProcesso"]'
                 tab = driver.find_element(By.XPATH, xp)
@@ -206,26 +194,22 @@ def consultar_auto(driver, auto):
                     elif len(tds) >= 2:
                         d['dt_andamento'] = tds[-1].text
                         d['andamento'] = tds[0].text
-            except:
-                d['andamento'] = 'Sem andamentos'
+            except: d['andamento'] = 'Sem andamentos'
             
             res['status'] = 'sucesso'
             res['dados'] = d
             res['mensagem'] = 'Sucesso'
 
         except Exception as e:
-            res['mensagem'] = f'Erro Extração: {str(e)[:50]}'
+            res['mensagem'] = f'Erro Leitura: {e}'
 
         driver.close()
         driver.switch_to.window(janela_main)
         return res
 
     except Exception as e:
-        if "Sessão Expirada" in str(e):
-            raise e # Joga o erro pra cima para fazer relogin
-        
-        res['mensagem'] = f'Erro Fluxo: {str(e)[:50]}'
-        # Tenta recuperar janela
+        if "Sessão Queda" in str(e): raise e
+        res['mensagem'] = f'Erro Fluxo: {str(e)[:30]}'
         if len(driver.window_handles) > 1:
             try: driver.switch_to.window(janela_main)
             except: pass
@@ -234,7 +218,7 @@ def consultar_auto(driver, auto):
 # =============================================================================
 # INTERFACE PRINCIPAL
 # =============================================================================
-st.title("🛡️ Robô ANTT - Consulta Robusta")
+st.title("🛡️ Robô ANTT - Modo Log")
 
 col1, col2 = st.columns(2)
 with col1: usuario = st.text_input("Usuário ANTT")
@@ -242,115 +226,103 @@ with col2: senha = st.text_input("Senha ANTT", type="password")
 
 uploaded_file = st.file_uploader("Planilha de Entrada (.xlsx)", type="xlsx")
 
-# Container para os logs dinâmicos
-log_container = st.empty()
+# Área de logs
+log_box = st.empty()
 
-if st.button("🚀 Iniciar Processamento Blindado") and uploaded_file and usuario:
-    # 1. Preparação
-    df = pd.read_excel(uploaded_file)
-    cols = ['Nº do Processo', 'Data da Infração', 'Código da Infração', 
-            'Fato Gerador', 'Último Andamento', 'Data do Último Andamento', 'Status Consulta']
-    for c in cols:
-        if c not in df.columns: df[c] = ""
-    df = df.astype(object).replace('nan', '')
-
-    st.session_state.df_parcial = df # Backup na sessão
-    
-    # 2. Inicialização do Driver
-    driver = get_driver()
-    
-    # 3. Login Inicial
-    if realizar_login(driver, usuario, senha):
-        
-        progress_bar = st.progress(0)
-        total_rows = len(df)
-        driver_restart_count = 0
-        
-        # ================= LOOP PRINCIPAL =================
-        for idx, row in df.iterrows():
-            try:
-                # Atualiza Logs na Tela
-                log_text = "\n".join(st.session_state.logs)
-                log_container.text_area("Log de Execução (Últimos eventos):", log_text, height=200)
-                
-                auto = str(row['Auto de Infração']).strip()
-                if not auto or auto == 'nan': continue
-
-                log_message(f"[{idx+1}/{total_rows}] Processando: {auto}")
-
-                # --- GESTÃO DE MEMÓRIA (REINICIA O BROWSER A CADA 20 CONSULTAS) ---
-                if driver_restart_count >= 20:
-                    log_message("⚠️ Limpeza de Memória: Reiniciando navegador...")
-                    driver.quit()
-                    time.sleep(2)
-                    driver = get_driver()
-                    realizar_login(driver, usuario, senha)
-                    driver_restart_count = 0
-
-                # --- VERIFICAÇÃO DE SESSÃO ---
-                if not verificar_sessao_ativa(driver):
-                    log_message("⚠️ Sessão caiu! Tentando reconectar...")
-                    if not realizar_login(driver, usuario, senha):
-                        log_message("❌ Não foi possível reconectar. Parando.")
-                        break
-                
-                # --- CONSULTA ---
-                try:
-                    res = consultar_auto(driver, auto)
-                except Exception as e:
-                    # Se deu erro de sessão durante a consulta, tenta uma vez mais
-                    if "Sessão Expirada" in str(e):
-                        log_message("Sessão expirou durante consulta. Reconectando...")
-                        realizar_login(driver, usuario, senha)
-                        res = consultar_auto(driver, auto)
-                    else:
-                        res = {'status': 'erro', 'mensagem': f'Erro fatal: {e}'}
-
-                # --- SALVAR RESULTADOS ---
-                df.at[idx, 'Status Consulta'] = str(res['mensagem'])
-                
-                if res['status'] == 'sucesso':
-                    d = res['dados']
-                    df.at[idx, 'Nº do Processo'] = str(d.get('processo', ''))
-                    df.at[idx, 'Data da Infração'] = str(d.get('data_inf', ''))
-                    df.at[idx, 'Código da Infração'] = str(d.get('codigo', ''))
-                    df.at[idx, 'Fato Gerador'] = str(d.get('fato', ''))
-                    df.at[idx, 'Último Andamento'] = str(d.get('andamento', ''))
-                    df.at[idx, 'Data do Último Andamento'] = str(d.get('dt_andamento', ''))
-                    log_message(f"✅ Sucesso: {auto}")
-                else:
-                    log_message(f"⚠️ {res['mensagem']}")
-
-                # Atualiza progresso e contadores
-                progress_bar.progress((idx + 1) / total_rows)
-                driver_restart_count += 1
-                
-                # Salva backup na sessão do Streamlit a cada linha (segurança)
-                st.session_state.df_parcial = df
-
-            except Exception as e_loop:
-                log_message(f"❌ Erro na linha {idx}: {e_loop}")
-                continue # Não para o script, vai para o próximo auto
-
-        # ================= FIM DO LOOP =================
-        log_message("🏁 Processamento finalizado!")
-        driver.quit()
-        
+# Botão principal
+if st.button("🚀 INICIAR CONSULTA"):
+    if not uploaded_file or not usuario:
+        st.warning("Preencha usuário e suba a planilha.")
     else:
-        st.error("Não foi possível iniciar. Falha no Login.")
+        st.session_state.logs = [] # Limpa logs antigos
+        log_message("Inicializando script...")
+        
+        try:
+            # 1. Carrega Planilha
+            df = pd.read_excel(uploaded_file)
+            cols = ['Nº do Processo', 'Data da Infração', 'Código da Infração', 
+                    'Fato Gerador', 'Último Andamento', 'Data do Último Andamento', 'Status Consulta']
+            for c in cols:
+                if c not in df.columns: df[c] = ""
+            df = df.astype(object).replace('nan', '')
+            
+            st.session_state.df_final = df # Backup inicial
+            
+            # 2. Inicia Driver
+            driver = get_driver()
+            
+            # 3. Login
+            if realizar_login_robusto(driver, usuario, senha):
+                log_message("Login OK. Iniciando loop...")
+                
+                total = len(df)
+                restart_counter = 0
+                
+                progress_text = st.empty()
+                bar = st.progress(0)
+                
+                for idx, row in df.iterrows():
+                    # Mostra log na tela
+                    log_box.text_area("Logs de Execução:", "\n".join(st.session_state.logs[-15:]), height=300)
+                    
+                    auto = str(row['Auto de Infração']).strip()
+                    if not auto or auto == 'nan': continue
+                    
+                    progress_text.text(f"Processando {idx+1}/{total}: {auto}")
+                    
+                    # Gestão de Memória
+                    if restart_counter >= 30:
+                        log_message("Reiniciando navegador (Memória)...")
+                        driver.quit()
+                        driver = get_driver()
+                        realizar_login_robusto(driver, usuario, senha)
+                        restart_counter = 0
 
-# --- ÁREA DE DOWNLOAD (PERSISTENTE) ---
-if 'df_parcial' in st.session_state:
+                    # Executa Consulta
+                    try:
+                        res = consultar_auto(driver, auto)
+                    except Exception as e:
+                        if "Sessão" in str(e):
+                            log_message("Sessão caiu. Relogando...")
+                            realizar_login_robusto(driver, usuario, senha)
+                            res = consultar_auto(driver, auto)
+                        else:
+                            res = {'status': 'erro', 'mensagem': f'Erro: {e}'}
+
+                    # Salva
+                    df.at[idx, 'Status Consulta'] = str(res['mensagem'])
+                    if res['status'] == 'sucesso':
+                        d = res['dados']
+                        df.at[idx, 'Nº do Processo'] = str(d.get('processo', ''))
+                        df.at[idx, 'Data da Infração'] = str(d.get('data_inf', ''))
+                        df.at[idx, 'Código da Infração'] = str(d.get('codigo', ''))
+                        df.at[idx, 'Fato Gerador'] = str(d.get('fato', ''))
+                        df.at[idx, 'Último Andamento'] = str(d.get('andamento', ''))
+                        df.at[idx, 'Data do Último Andamento'] = str(d.get('dt_andamento', ''))
+                        log_message(f"OK: {auto}")
+                    else:
+                        log_message(f"Falha {auto}: {res['mensagem']}")
+                    
+                    st.session_state.df_final = df # Salva na sessão
+                    restart_counter += 1
+                    bar.progress((idx+1)/total)
+
+                log_message("Fim do processamento.")
+                driver.quit()
+                st.success("Concluído!")
+                
+            else:
+                st.error("Login falhou. Verifique logs.")
+                driver.quit()
+
+        except Exception as e:
+            st.error(f"Erro Fatal: {e}")
+            log_message(f"CRASH: {e}")
+
+# Botão de Download (Persistente)
+if 'df_final' in st.session_state:
     st.write("---")
-    st.success("Tabela processada disponível para download.")
-    
     buffer = BytesIO()
-    st.session_state.df_parcial.to_excel(buffer, index=False)
+    st.session_state.df_final.to_excel(buffer, index=False)
     buffer.seek(0)
-    
-    st.download_button(
-        label="📥 Baixar Planilha Final",
-        data=buffer,
-        file_name="Resultado_ANTT_Blindado.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.download_button("📥 BAIXAR PLANILHA FINAL", data=buffer, file_name="Resultado_ANTT.xlsx")

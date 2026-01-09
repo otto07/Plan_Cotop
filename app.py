@@ -18,7 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.common.exceptions import WebDriverException
 
 
 # =============================================================================
@@ -59,21 +59,25 @@ CFG = Config()
 
 
 # =============================================================================
-# HELPERS DE ESTADO
+# SESSION STATE
 # =============================================================================
 def init_state():
     defaults = {
         "job_id": None,
         "running": False,
+
         "cursor": 0,
         "total": 0,
         "ok": 0,
         "fail": 0,
-        "df_path": None,         # checkpoint parquet
+
         "result_xlsx_path": None,
         "result_xlsx_name": None,
+
         "summary": "",
         "last_error": "",
+
+        "ui_logs": [],  # lista de (HH:MM:SS, level, msg)
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -83,8 +87,16 @@ def init_state():
 init_state()
 
 
+def ui_log(msg: str, level: str = "info"):
+    ts = time.strftime("%H:%M:%S")
+    st.session_state.ui_logs.append((ts, level, msg))
+    st.session_state.ui_logs = st.session_state.ui_logs[-120:]  # limita histórico
+
+
+# =============================================================================
+# JOB / CHECKPOINT PATHS
+# =============================================================================
 def make_job_id(file_bytes: bytes) -> str:
-    # id determinístico por arquivo (suficiente p/ /tmp)
     return hashlib.sha256(file_bytes).hexdigest()[:16]
 
 
@@ -99,8 +111,13 @@ def paths_for_job(job_id: str) -> Dict[str, str]:
 
 def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col in [
-        CFG.col_processo, CFG.col_data, CFG.col_codigo, CFG.col_fato,
-        CFG.col_andamento, CFG.col_data_andamento, CFG.col_status
+        CFG.col_processo,
+        CFG.col_data,
+        CFG.col_codigo,
+        CFG.col_fato,
+        CFG.col_andamento,
+        CFG.col_data_andamento,
+        CFG.col_status,
     ]:
         if col not in df.columns:
             df[col] = ""
@@ -133,7 +150,7 @@ def save_result_xlsx(df: pd.DataFrame, job_id: str) -> str:
 
 
 # =============================================================================
-# SELENIUM RUNTIME (cache_resource p/ sobreviver a reruns do script)
+# SELENIUM RUNTIME (PERSISTE ENTRE RERUNS)
 # =============================================================================
 class SeleniumRuntime:
     def __init__(self):
@@ -142,6 +159,7 @@ class SeleniumRuntime:
 
     def start(self, headless: bool = True):
         self.stop()
+
         chrome_options = Options()
         chrome_options.binary_location = "/usr/bin/chromium"
         if headless:
@@ -182,16 +200,15 @@ class SeleniumRuntime:
 
 @st.cache_resource
 def get_runtime() -> SeleniumRuntime:
-    # cache_resource tende a sobreviver a reruns enquanto o processo está vivo
     return SeleniumRuntime()
 
 
 # =============================================================================
-# LOGIN / CHECKS
+# LOGIN / SESSION CHECKS
 # =============================================================================
 def is_logged_in(rt: SeleniumRuntime) -> bool:
     try:
-        if rt.driver is None or rt.wait is None:
+        if rt.driver is None:
             return False
         rt.driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")
         return True
@@ -201,20 +218,26 @@ def is_logged_in(rt: SeleniumRuntime) -> bool:
 
 def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -> bool:
     try:
+        ui_log("Abrindo página de login...")
         rt.driver.get(CFG.url_login)
+
         actions = ActionChains(rt.driver)
 
+        ui_log("Inserindo usuário...")
         id_user = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_TextBoxUsuario"
         campo_user = rt.wait.until(EC.element_to_be_clickable((By.ID, id_user)))
         actions.move_to_element(campo_user).click().perform()
         campo_user.clear()
         campo_user.send_keys(usuario)
 
+        ui_log("Confirmando usuário (OK)...")
         id_btn_ok = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk"
         rt.driver.find_element(By.ID, id_btn_ok).click()
 
+        ui_log("Aguardando liberação do campo de senha...")
         time.sleep(3)
 
+        ui_log("Inserindo senha e enviando (ENTER)...")
         xpath_senha = "//input[@type='password']"
         rt.wait.until(EC.visibility_of_element_located((By.XPATH, xpath_senha)))
         campo_senha = rt.driver.find_element(By.XPATH, xpath_senha)
@@ -224,13 +247,18 @@ def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -
         time.sleep(1)
         campo_senha.send_keys(Keys.RETURN)
 
+        ui_log("Validando acesso (campo de consulta)...")
         rt.wait.until(
             EC.presence_of_element_located(
                 (By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")
             )
         )
+
+        ui_log("Login confirmado.")
         return True
+
     except Exception as e:
+        ui_log("Falha no login.", "error")
         if debug:
             st.exception(e)
             try:
@@ -241,20 +269,19 @@ def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -
 
 
 def ensure_session(rt: SeleniumRuntime, usuario: str, senha: str, headless: bool, debug: bool) -> bool:
-    # garante driver
     if not rt.is_alive():
+        ui_log("WebDriver não está ativo. Reiniciando driver...", "warning")
         rt.start(headless=headless)
 
-    # garante login
     if is_logged_in(rt):
         return True
 
-    ok = realizar_login(rt, usuario, senha, debug=debug)
-    return ok
+    ui_log("Sessão não autenticada. Tentando relogin...", "warning")
+    return realizar_login(rt, usuario, senha, debug=debug)
 
 
 # =============================================================================
-# CONSULTA (com retries)
+# CONSULTA
 # =============================================================================
 def esperar_dados(rt: SeleniumRuntime, element_id: str, timeout: int = 10) -> str:
     end = time.time() + timeout
@@ -271,8 +298,8 @@ def esperar_dados(rt: SeleniumRuntime, element_id: str, timeout: int = 10) -> st
 
 def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
     res = {"status": "erro", "dados": {}, "mensagem": ""}
-    wait = rt.wait
     driver = rt.driver
+    wait = rt.wait
     janela_main = driver.current_window_handle
 
     try:
@@ -287,12 +314,11 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
         encontrou = False
         for _ in range(3):
             try:
-                btn = driver.find_element(
+                btn = driver = driver.find_element(
                     By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar"
                 )
                 driver.execute_script("arguments[0].click();", btn)
                 time.sleep(2)
-
                 wait.until(
                     EC.presence_of_element_located(
                         (By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0")
@@ -346,6 +372,7 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
                 wait.until(EC.presence_of_element_located((By.XPATH, xp)))
                 tab = driver.find_element(By.XPATH, xp)
                 trs = tab.find_elements(By.TAG_NAME, "tr")
+
                 if len(trs) > 1:
                     tds = trs[-1].find_elements(By.TAG_NAME, "td")
                     if len(tds) >= 4:
@@ -364,10 +391,10 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
             res["status"] = "sucesso"
             res["dados"] = dados
             res["mensagem"] = "Sucesso"
+
         except Exception as e:
             res["mensagem"] = f"Erro leitura: {e}"
 
-        # fechar popup
         try:
             driver.close()
         except Exception:
@@ -402,8 +429,9 @@ def processar_auto_com_recuperacao(
 
             res = processar_auto(rt, auto)
 
-            # Se cair numa tela que indica logout, força relogin na próxima tentativa
+            # se "caiu" login, força reinício para próxima tentativa
             if res.get("status") != "sucesso" and not is_logged_in(rt):
+                ui_log("Perda de sessão detectada. Forçando reinício do driver...", "warning")
                 rt.stop()
                 continue
 
@@ -411,11 +439,8 @@ def processar_auto_com_recuperacao(
 
         except WebDriverException as e:
             last_exc = e
-            # recupera: reinicia driver
-            try:
-                rt.stop()
-            except Exception:
-                pass
+            ui_log(f"Erro WebDriver (tentativa {attempt+1}). Reiniciando driver...", "warning")
+            rt.stop()
             time.sleep(1)
             continue
         except Exception as e:
@@ -427,65 +452,76 @@ def processar_auto_com_recuperacao(
 
 
 # =============================================================================
-# PIPELINE EM LOTES (checkpoint + rerun)
+# PIPELINE EM LOTES + CHECKPOINT + RERUN
 # =============================================================================
 def iniciar_job(file_bytes: bytes):
     job_id = make_job_id(file_bytes)
     st.session_state.job_id = job_id
 
-    p = paths_for_job(job_id)
-    st.session_state.df_path = p["checkpoint_parquet"]
-    st.session_state.result_xlsx_path = None
-    st.session_state.result_xlsx_name = None
-
     st.session_state.cursor = 0
     st.session_state.total = 0
     st.session_state.ok = 0
     st.session_state.fail = 0
+
+    st.session_state.result_xlsx_path = None
+    st.session_state.result_xlsx_name = None
+
     st.session_state.summary = ""
     st.session_state.last_error = ""
+    st.session_state.ui_logs = []
+    ui_log(f"Job iniciado: {job_id}")
 
 
 def carregar_df_or_checkpoint(uploaded_file) -> pd.DataFrame:
-    # Se houver checkpoint, retoma
     job_id = st.session_state.job_id
+
     df_ck, meta = load_checkpoint(job_id)
     if df_ck is not None and meta is not None:
         st.session_state.cursor = int(meta.get("cursor", 0))
         st.session_state.total = int(meta.get("total", len(df_ck)))
         st.session_state.ok = int(meta.get("ok", 0))
         st.session_state.fail = int(meta.get("fail", 0))
+        ui_log(f"Checkpoint carregado. Retomando em {st.session_state.cursor}/{st.session_state.total}.")
         return df_ck
 
-    # senão, carrega do upload
     df = pd.read_excel(uploaded_file)
     if CFG.col_auto not in df.columns:
         raise ValueError(f"Coluna obrigatória ausente: {CFG.col_auto}")
     df = ensure_output_columns(df)
+
     df_filtrado = df[df[CFG.col_auto].astype(str).str.strip() != ""]
     st.session_state.total = int(len(df_filtrado))
     st.session_state.cursor = 0
     st.session_state.ok = 0
     st.session_state.fail = 0
+
+    ui_log(f"Planilha carregada. Total de autos: {st.session_state.total}.")
     return df
 
 
-def rodar_lote(df: pd.DataFrame, usuario: str, senha: str, headless: bool, debug: bool,
-              batch_size: int, checkpoint_every: int, throttle: float):
+def rodar_lote(
+    df: pd.DataFrame,
+    usuario: str,
+    senha: str,
+    headless: bool,
+    debug: bool,
+    batch_size: int,
+    checkpoint_every: int,
+    throttle: float,
+):
     job_id = st.session_state.job_id
     rt = get_runtime()
 
-    # garante total (caso esteja vazio por reload)
     df_filtrado_idx = df[df[CFG.col_auto].astype(str).str.strip() != ""].index.tolist()
     total = len(df_filtrado_idx)
     st.session_state.total = total
 
     start_cursor = st.session_state.cursor
     end_cursor = min(start_cursor + batch_size, total)
+    ui_log(f"Iniciando lote: {start_cursor+1} até {end_cursor} de {total}.")
 
-    # UI leve
     progress = st.progress(start_cursor / max(total, 1))
-    info = st.empty()
+    live = st.empty()
 
     for pos in range(start_cursor, end_cursor):
         original_idx = df_filtrado_idx[pos]
@@ -497,6 +533,7 @@ def rodar_lote(df: pd.DataFrame, usuario: str, senha: str, headless: bool, debug
         )
 
         df.at[original_idx, CFG.col_status] = res.get("mensagem", "")
+
         if res.get("status") == "sucesso":
             d = res.get("dados", {})
             df.at[original_idx, CFG.col_processo] = d.get("processo", "")
@@ -511,7 +548,16 @@ def rodar_lote(df: pd.DataFrame, usuario: str, senha: str, headless: bool, debug
 
         st.session_state.cursor = pos + 1
 
-        # checkpoint periódico
+        # UI leve (uma linha)
+        if (st.session_state.cursor % 10 == 0) or (st.session_state.cursor == total):
+            live.caption(
+                f"Progresso: {st.session_state.cursor}/{total} | OK: {st.session_state.ok} | Falhas: {st.session_state.fail}"
+            )
+            ui_log(f"Progresso: {st.session_state.cursor}/{total} (OK: {st.session_state.ok}, Falhas: {st.session_state.fail}).")
+
+        progress.progress(st.session_state.cursor / max(total, 1))
+
+        # checkpoint + parcial
         if (st.session_state.cursor % checkpoint_every == 0) or (st.session_state.cursor == total):
             meta = {
                 "cursor": st.session_state.cursor,
@@ -521,44 +567,45 @@ def rodar_lote(df: pd.DataFrame, usuario: str, senha: str, headless: bool, debug
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             save_checkpoint(df, meta, job_id)
-            # também salva XLSX parcial (permite download mesmo antes de terminar)
-            partial_xlsx = save_result_xlsx(df, job_id)
-            st.session_state.result_xlsx_path = partial_xlsx
-            st.session_state.result_xlsx_name = f"ANTT_Parcial_{job_id}_{st.session_state.cursor}de{total}.xlsx"
+            ui_log(f"Checkpoint salvo em {st.session_state.cursor}/{total}.")
 
-        # updates leves (somente contadores)
-        progress.progress(st.session_state.cursor / max(total, 1))
-        info.caption(f"Progresso: {st.session_state.cursor}/{total} | OK: {st.session_state.ok} | Falhas: {st.session_state.fail}")
+            partial_path = save_result_xlsx(df, job_id)
+            st.session_state.result_xlsx_path = partial_path
+            st.session_state.result_xlsx_name = f"ANTT_Parcial_{job_id}_{st.session_state.cursor}de{total}.xlsx"
+            ui_log("Arquivo parcial atualizado para download.")
 
         if throttle > 0:
             time.sleep(throttle)
 
-    # lote terminou: se finalizou tudo, grava final
+    progress.empty()
+    live.empty()
+
+    # finalização
     if st.session_state.cursor >= total:
+        ui_log("Processamento finalizado. Gerando arquivo final...")
         final_path = save_result_xlsx(df, job_id)
         st.session_state.result_xlsx_path = final_path
         st.session_state.result_xlsx_name = f"ANTT_Resultado_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
         st.session_state.summary = f"Concluído. OK: {st.session_state.ok} | Falhas/Não encontrados: {st.session_state.fail}"
         st.session_state.running = False
+        ui_log("Arquivo final pronto para download.")
     else:
-        # continua no próximo rerun
         st.session_state.summary = f"Em andamento. OK: {st.session_state.ok} | Falhas: {st.session_state.fail}"
-
-    progress.empty()
-    info.empty()
 
 
 # =============================================================================
 # UI
 # =============================================================================
-st.title("🚛 Robô ANTT - Consulta Automatizada (Robusto)")
+st.title("Robô ANTT - Consulta Automatizada (Robusto)")
 
 with st.sidebar:
     st.header("Opções")
-    debug = st.checkbox("Modo debug (mostrar exceções/screenshot)", value=False)
+    debug = st.checkbox("Modo debug (exceções/screenshot)", value=False)
     headless = st.checkbox("Executar headless", value=True)
-    batch_size = st.slider("Tamanho do lote", min_value=5, max_value=50, value=15, step=5)
-    checkpoint_every = st.slider("Checkpoint a cada N autos", min_value=5, max_value=50, value=10, step=5)
+
+    # Para 300+ autos: lotes médios, checkpoint frequente
+    batch_size = st.slider("Tamanho do lote", min_value=10, max_value=40, value=20, step=5)
+    checkpoint_every = st.slider("Checkpoint a cada N autos", min_value=5, max_value=30, value=10, step=5)
     throttle = st.selectbox("Delay entre consultas", [0.0, 0.2, 0.3, 0.5, 0.8], index=2)
 
 col1, col2 = st.columns(2)
@@ -573,23 +620,28 @@ arquivo = st.file_uploader(
     disabled=st.session_state.running
 )
 
-btn_col1, btn_col2, btn_col3 = st.columns(3)
-with btn_col1:
-    start = st.button("🚀 Iniciar / Retomar", type="primary", use_container_width=True, disabled=st.session_state.running)
-with btn_col2:
-    stop = st.button("⏹ Parar", use_container_width=True, disabled=not st.session_state.running)
-with btn_col3:
-    limpar = st.button("🧹 Limpar estado", use_container_width=True)
+b1, b2, b3 = st.columns(3)
+with b1:
+    start = st.button("Iniciar / Retomar", type="primary", use_container_width=True, disabled=st.session_state.running)
+with b2:
+    stop = st.button("Parar", use_container_width=True, disabled=not st.session_state.running)
+with b3:
+    reset = st.button("Limpar estado", use_container_width=True)
 
-if limpar:
-    # não mata cache_resource, mas limpa job e caminhos
-    init_state()
+if reset:
+    # limpa sessão e runtime
+    try:
+        get_runtime().stop()
+    except Exception:
+        pass
     st.session_state.clear()
+    init_state()
     st.rerun()
 
 if stop:
     st.session_state.running = False
-    st.warning("Processamento interrompido pelo usuário.")
+    ui_log("Execução interrompida pelo usuário.", "warning")
+    st.warning("Execução interrompida.")
 
 if start:
     if not usuario or not senha or arquivo is None:
@@ -598,15 +650,37 @@ if start:
         file_bytes = arquivo.getvalue()
         if not st.session_state.job_id:
             iniciar_job(file_bytes)
-
         st.session_state.running = True
+        ui_log("Execução iniciada.")
 
-# execução em lotes (permite “continuação” automática)
+# Painel de logs (leve)
+with st.status("Execução", expanded=True) as status_box:
+    logs = st.session_state.ui_logs[-25:]
+    if logs:
+        for ts, level, msg in logs:
+            if level == "error":
+                st.error(f"[{ts}] {msg}")
+            elif level == "warning":
+                st.warning(f"[{ts}] {msg}")
+            else:
+                st.write(f"[{ts}] {msg}")
+    else:
+        st.write("Nenhum log ainda.")
+
+    if st.session_state.running:
+        status_box.update(label="Execução (em andamento)", state="running", expanded=True)
+    elif st.session_state.last_error:
+        status_box.update(label="Execução (com erro)", state="error", expanded=True)
+    elif st.session_state.summary:
+        status_box.update(label="Execução (finalizada)", state="complete", expanded=False)
+    else:
+        status_box.update(label="Execução (ociosa)", state="complete", expanded=False)
+
+# Execução em lotes + rerun controlado
 if st.session_state.running:
     try:
         df = carregar_df_or_checkpoint(arquivo)
-        total = st.session_state.total
-        if total <= 0:
+        if st.session_state.total <= 0:
             st.error("Nenhum auto encontrado.")
             st.session_state.running = False
         else:
@@ -616,12 +690,12 @@ if st.session_state.running:
                 senha=senha,
                 headless=headless,
                 debug=debug,
-                batch_size=batch_size,
-                checkpoint_every=checkpoint_every,
+                batch_size=int(batch_size),
+                checkpoint_every=int(checkpoint_every),
                 throttle=float(throttle),
             )
 
-            # Se ainda tem trabalho, rerun controlado para continuar no próximo lote
+            # continua até terminar (evita loop infinito: só rerun se ainda há trabalho)
             if st.session_state.running and st.session_state.cursor < st.session_state.total:
                 time.sleep(0.2)
                 st.rerun()
@@ -629,22 +703,23 @@ if st.session_state.running:
     except Exception as e:
         st.session_state.running = False
         st.session_state.last_error = str(e)
+        ui_log(f"Erro no processamento: {e}", "error")
         st.error(f"Erro no processamento: {e}")
         if debug:
             st.exception(e)
 
-# status final (leve)
+# Resumo
 if st.session_state.summary:
     if st.session_state.running:
         st.info(st.session_state.summary)
     else:
         st.success(st.session_state.summary)
 
-# download sempre disponível (parcial ou final)
+# Download sempre disponível (parcial/final)
 if st.session_state.result_xlsx_path and os.path.exists(st.session_state.result_xlsx_path):
     with open(st.session_state.result_xlsx_path, "rb") as f:
         st.download_button(
-            "📥 Baixar resultado (parcial/final)",
+            "Baixar resultado (parcial/final)",
             data=f,
             file_name=st.session_state.result_xlsx_name or "ANTT_Resultado.xlsx",
             mime=MIME_XLSX,

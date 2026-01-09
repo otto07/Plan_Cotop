@@ -2,7 +2,6 @@ import os
 import time
 import json
 import hashlib
-import tempfile
 import logging
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, Tuple
@@ -65,18 +64,14 @@ def init_state():
     defaults = {
         "job_id": None,
         "running": False,
-
         "cursor": 0,
         "total": 0,
         "ok": 0,
         "fail": 0,
-
         "result_xlsx_path": None,
         "result_xlsx_name": None,
-
         "summary": "",
         "last_error": "",
-
         "ui_logs": [],  # lista de (HH:MM:SS, level, msg)
     }
     for k, v in defaults.items():
@@ -90,7 +85,7 @@ init_state()
 def ui_log(msg: str, level: str = "info"):
     ts = time.strftime("%H:%M:%S")
     st.session_state.ui_logs.append((ts, level, msg))
-    st.session_state.ui_logs = st.session_state.ui_logs[-120:]  # limita histórico
+    st.session_state.ui_logs = st.session_state.ui_logs[-120:]
 
 
 # =============================================================================
@@ -103,7 +98,8 @@ def make_job_id(file_bytes: bytes) -> str:
 def paths_for_job(job_id: str) -> Dict[str, str]:
     base = f"antt_{job_id}"
     return {
-        "checkpoint_parquet": os.path.join("/tmp", f"{base}_checkpoint.parquet"),
+        # >>> TROCA: parquet -> csv.gz (robusto p/ dtype misto)
+        "checkpoint_csv": os.path.join("/tmp", f"{base}_checkpoint.csv.gz"),
         "checkpoint_meta": os.path.join("/tmp", f"{base}_meta.json"),
         "result_xlsx": os.path.join("/tmp", f"{base}_result.xlsx"),
     }
@@ -126,19 +122,29 @@ def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def save_checkpoint(df: pd.DataFrame, meta: Dict[str, Any], job_id: str) -> None:
+    """
+    Checkpoint robusto:
+    - salva CSV gzip (tolerante a dtype misto)
+    - não assume tipos numéricos
+    """
     p = paths_for_job(job_id)
-    df.to_parquet(p["checkpoint_parquet"], index=False)
+    df.to_csv(p["checkpoint_csv"], index=False, encoding="utf-8-sig", compression="gzip")
     with open(p["checkpoint_meta"], "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False)
 
 
 def load_checkpoint(job_id: str) -> Tuple[Optional[pd.DataFrame], Optional[Dict[str, Any]]]:
     p = paths_for_job(job_id)
-    if not (os.path.exists(p["checkpoint_parquet"]) and os.path.exists(p["checkpoint_meta"])):
+    if not (os.path.exists(p["checkpoint_csv"]) and os.path.exists(p["checkpoint_meta"])):
         return None, None
-    df = pd.read_parquet(p["checkpoint_parquet"])
+
+    # Lê como string para não quebrar com colunas mistas (ex.: "Peso não encontrado")
+    df = pd.read_csv(p["checkpoint_csv"], dtype=str, compression="gzip")
+    df = df.astype(object).replace("nan", "").fillna("")
+
     with open(p["checkpoint_meta"], "r", encoding="utf-8") as f:
         meta = json.load(f)
+
     return df, meta
 
 
@@ -210,7 +216,10 @@ def is_logged_in(rt: SeleniumRuntime) -> bool:
     try:
         if rt.driver is None:
             return False
-        rt.driver.find_element(By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")
+        rt.driver.find_element(
+            By.ID,
+            "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao",
+        )
         return True
     except Exception:
         return False
@@ -250,7 +259,10 @@ def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -
         ui_log("Validando acesso (campo de consulta)...")
         rt.wait.until(
             EC.presence_of_element_located(
-                (By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")
+                (
+                    By.ID,
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao",
+                )
             )
         )
 
@@ -305,7 +317,10 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
     try:
         campo = wait.until(
             EC.element_to_be_clickable(
-                (By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao")
+                (
+                    By.ID,
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao",
+                )
             )
         )
         campo.clear()
@@ -314,14 +329,20 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
         encontrou = False
         for _ in range(3):
             try:
-                btn = driver = driver.find_element(
-                    By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar"
+                # >>> CORREÇÃO CRÍTICA: NÃO sobrescrever "driver"
+                btn = driver.find_element(
+                    By.ID,
+                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar",
                 )
                 driver.execute_script("arguments[0].click();", btn)
                 time.sleep(2)
+
                 wait.until(
                     EC.presence_of_element_located(
-                        (By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0")
+                        (
+                            By.ID,
+                            "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0",
+                        )
                     )
                 )
                 encontrou = True
@@ -336,7 +357,8 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
             return res
 
         btn_edit = driver.find_element(
-            By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0"
+            By.ID,
+            "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_gdvAutoInfracao_btnEditar_0",
         )
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_edit)
         time.sleep(1)
@@ -356,15 +378,18 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
             dados["processo"] = esperar_dados(rt, id_proc) or driver.find_element(By.ID, id_proc).get_attribute("value")
 
             dados["data_infracao"] = driver.find_element(
-                By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbDataInfracao"
+                By.ID,
+                "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbDataInfracao",
             ).get_attribute("value")
 
             dados["codigo"] = driver.find_element(
-                By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbCodigoInfracao"
+                By.ID,
+                "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbCodigoInfracao",
             ).get_attribute("value")
 
             dados["fato"] = driver.find_element(
-                By.ID, "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbObservacaoFiscalizacao"
+                By.ID,
+                "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ucDetalheAutoInfracao5083_txbObservacaoFiscalizacao",
             ).get_attribute("value")
 
             try:
@@ -429,7 +454,6 @@ def processar_auto_com_recuperacao(
 
             res = processar_auto(rt, auto)
 
-            # se "caiu" login, força reinício para próxima tentativa
             if res.get("status") != "sucesso" and not is_logged_in(rt):
                 ui_log("Perda de sessão detectada. Forçando reinício do driver...", "warning")
                 rt.stop()
@@ -482,7 +506,7 @@ def carregar_df_or_checkpoint(uploaded_file) -> pd.DataFrame:
         st.session_state.ok = int(meta.get("ok", 0))
         st.session_state.fail = int(meta.get("fail", 0))
         ui_log(f"Checkpoint carregado. Retomando em {st.session_state.cursor}/{st.session_state.total}.")
-        return df_ck
+        return ensure_output_columns(df_ck)
 
     df = pd.read_excel(uploaded_file)
     if CFG.col_auto not in df.columns:
@@ -548,7 +572,6 @@ def rodar_lote(
 
         st.session_state.cursor = pos + 1
 
-        # UI leve (uma linha)
         if (st.session_state.cursor % 10 == 0) or (st.session_state.cursor == total):
             live.caption(
                 f"Progresso: {st.session_state.cursor}/{total} | OK: {st.session_state.ok} | Falhas: {st.session_state.fail}"
@@ -557,7 +580,7 @@ def rodar_lote(
 
         progress.progress(st.session_state.cursor / max(total, 1))
 
-        # checkpoint + parcial
+        # checkpoint + parcial (blindado)
         if (st.session_state.cursor % checkpoint_every == 0) or (st.session_state.cursor == total):
             meta = {
                 "cursor": st.session_state.cursor,
@@ -566,13 +589,20 @@ def rodar_lote(
                 "fail": st.session_state.fail,
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
-            save_checkpoint(df, meta, job_id)
-            ui_log(f"Checkpoint salvo em {st.session_state.cursor}/{total}.")
 
-            partial_path = save_result_xlsx(df, job_id)
-            st.session_state.result_xlsx_path = partial_path
-            st.session_state.result_xlsx_name = f"ANTT_Parcial_{job_id}_{st.session_state.cursor}de{total}.xlsx"
-            ui_log("Arquivo parcial atualizado para download.")
+            try:
+                save_checkpoint(df, meta, job_id)
+                ui_log(f"Checkpoint salvo em {st.session_state.cursor}/{total}.")
+            except Exception as e:
+                ui_log(f"Falha ao salvar checkpoint (seguindo execução): {e}", "warning")
+
+            try:
+                partial_path = save_result_xlsx(df, job_id)
+                st.session_state.result_xlsx_path = partial_path
+                st.session_state.result_xlsx_name = f"ANTT_Parcial_{job_id}_{st.session_state.cursor}de{total}.xlsx"
+                ui_log("Arquivo parcial atualizado para download.")
+            except Exception as e:
+                ui_log(f"Falha ao gerar XLSX parcial: {e}", "warning")
 
         if throttle > 0:
             time.sleep(throttle)
@@ -580,15 +610,18 @@ def rodar_lote(
     progress.empty()
     live.empty()
 
-    # finalização
     if st.session_state.cursor >= total:
         ui_log("Processamento finalizado. Gerando arquivo final...")
-        final_path = save_result_xlsx(df, job_id)
-        st.session_state.result_xlsx_path = final_path
-        st.session_state.result_xlsx_name = f"ANTT_Resultado_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        try:
+            final_path = save_result_xlsx(df, job_id)
+            st.session_state.result_xlsx_path = final_path
+            st.session_state.result_xlsx_name = f"ANTT_Resultado_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+            ui_log("Arquivo final pronto para download.")
+        except Exception as e:
+            ui_log(f"Falha ao gerar XLSX final: {e}", "error")
+
         st.session_state.summary = f"Concluído. OK: {st.session_state.ok} | Falhas/Não encontrados: {st.session_state.fail}"
         st.session_state.running = False
-        ui_log("Arquivo final pronto para download.")
     else:
         st.session_state.summary = f"Em andamento. OK: {st.session_state.ok} | Falhas: {st.session_state.fail}"
 
@@ -603,7 +636,6 @@ with st.sidebar:
     debug = st.checkbox("Modo debug (exceções/screenshot)", value=False)
     headless = st.checkbox("Executar headless", value=True)
 
-    # Para 300+ autos: lotes médios, checkpoint frequente
     batch_size = st.slider("Tamanho do lote", min_value=10, max_value=40, value=20, step=5)
     checkpoint_every = st.slider("Checkpoint a cada N autos", min_value=5, max_value=30, value=10, step=5)
     throttle = st.selectbox("Delay entre consultas", [0.0, 0.2, 0.3, 0.5, 0.8], index=2)
@@ -629,7 +661,6 @@ with b3:
     reset = st.button("Limpar estado", use_container_width=True)
 
 if reset:
-    # limpa sessão e runtime
     try:
         get_runtime().stop()
     except Exception:
@@ -695,7 +726,6 @@ if st.session_state.running:
                 throttle=float(throttle),
             )
 
-            # continua até terminar (evita loop infinito: só rerun se ainda há trabalho)
             if st.session_state.running and st.session_state.cursor < st.session_state.total:
                 time.sleep(0.2)
                 st.rerun()
@@ -725,7 +755,7 @@ if st.session_state.result_xlsx_path and os.path.exists(st.session_state.result_
             mime=MIME_XLSX,
             on_click="ignore",
             use_container_width=True,
-            key="download_result"
+            key="download_result",
         )
 else:
     st.caption("Nenhum arquivo disponível para download ainda.")

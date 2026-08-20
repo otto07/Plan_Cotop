@@ -41,7 +41,7 @@ MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # =============================================================================
 @dataclass
 class Config:
-    url_login: str = "https://https://appweb1.antt.gov.br/spm/Site/DefesaCTB/ConsultaProcessoSituacao.aspx"
+    url_login: str = "appweb1.antt.gov.br/spm/Site/DefesaCTB/ConsultaProcessoSituacao.aspx"
     timeout: int = 20
 
     col_auto: str = "Auto de Infração"

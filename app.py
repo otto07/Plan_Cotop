@@ -228,10 +228,10 @@ def is_logged_in(rt: SeleniumRuntime) -> bool:
 
 def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -> bool:
     """
-    Fluxo de login corrigido:
-    - Preenche usuário
-    - Preenche senha
-    - Clica no botão OK (submit)
+    Fluxo de login robusto:
+    - Preenche usuário e senha, clica em OK.
+    - Após login, navega diretamente para a página de consulta.
+    - Verifica se o campo de consulta está presente.
     """
     try:
         ui_log("Abrindo página de login...")
@@ -251,34 +251,50 @@ def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -
         campo_senha.send_keys(senha)
         ui_log("Senha preenchida.")
 
-        # 3. Botão OK (submit do formulário)
+        # 3. Botão OK
         id_btn_ok = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk"
         btn_ok = rt.wait.until(EC.element_to_be_clickable((By.ID, id_btn_ok)))
         btn_ok.click()
         ui_log("Botão OK clicado. Aguardando redirecionamento...")
 
-        # 4. Aguarda o redirecionamento e a página de consulta carregar
-        time.sleep(5)  # tempo extra para o sistema processar o login
+        # 4. Aguarda um tempo para o login processar
+        time.sleep(5)
 
-        # 5. Validação: presença do campo de consulta (indica login bem-sucedido)
-        rt.wait.until(
-            EC.presence_of_element_located(
-                (
-                    By.ID,
-                    "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao",
-                )
-            )
-        )
+        # 5. *** NOVO: Navega diretamente para a página de consulta ***
+        url_consulta = "https://appweb1.antt.gov.br/spm/Site/DefesaCTB/ConsultaProcessoSituacao.aspx"
+        ui_log(f"Navegando para a página de consulta: {url_consulta}")
+        rt.driver.get(url_consulta)
+        time.sleep(3)
 
-        ui_log("Login confirmado com sucesso.")
-        return True
+        # 6. Verifica se a página de consulta carregou (campo de auto)
+        campo_auto_id = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_txbAutoInfracao"
+        try:
+            rt.wait.until(EC.presence_of_element_located((By.ID, campo_auto_id)))
+            ui_log("Página de consulta carregada com sucesso.")
+            return True
+        except Exception:
+            # Se não encontrar, pode ser que a página de erro tenha aparecido novamente
+            ui_log("Campo de consulta não encontrado. Verificando se há erro...", "warning")
+            if "Exceção de Sistema" in rt.driver.page_source:
+                ui_log("Página de erro detectada. Tentando recarregar a consulta...", "warning")
+                # Tenta novamente após 3 segundos
+                time.sleep(3)
+                rt.driver.get(url_consulta)
+                time.sleep(3)
+                # Última tentativa
+                rt.wait.until(EC.presence_of_element_located((By.ID, campo_auto_id)))
+                ui_log("Página de consulta carregada na segunda tentativa.")
+                return True
+            else:
+                # Se não for erro, levanta exceção para tratamento superior
+                raise
 
     except Exception as e:
-        ui_log("Falha no login.", "error")
+        ui_log("Falha no login ou no carregamento da página de consulta.", "error")
         if debug:
             st.exception(e)
             try:
-                st.image(rt.driver.get_screenshot_as_png(), caption="Debug - falha no login")
+                st.image(rt.driver.get_screenshot_as_png(), caption="Debug - falha no login/consulta")
             except Exception:
                 pass
         return False

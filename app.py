@@ -41,7 +41,8 @@ MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # =============================================================================
 @dataclass
 class Config:
-    url_login: str = "appweb1.antt.gov.br/spm/Site/DefesaCTB/ConsultaProcessoSituacao.aspx"
+    # URL de login CORRIGIDA
+    url_login: str = "https://appweb1.antt.gov.br/spm/Site/Login.aspx"
     timeout: int = 20
 
     col_auto: str = "Auto de Infração"
@@ -98,7 +99,6 @@ def make_job_id(file_bytes: bytes) -> str:
 def paths_for_job(job_id: str) -> Dict[str, str]:
     base = f"antt_{job_id}"
     return {
-        # >>> TROCA: parquet -> csv.gz (robusto p/ dtype misto)
         "checkpoint_csv": os.path.join("/tmp", f"{base}_checkpoint.csv.gz"),
         "checkpoint_meta": os.path.join("/tmp", f"{base}_meta.json"),
         "result_xlsx": os.path.join("/tmp", f"{base}_result.xlsx"),
@@ -122,11 +122,6 @@ def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def save_checkpoint(df: pd.DataFrame, meta: Dict[str, Any], job_id: str) -> None:
-    """
-    Checkpoint robusto:
-    - salva CSV gzip (tolerante a dtype misto)
-    - não assume tipos numéricos
-    """
     p = paths_for_job(job_id)
     df.to_csv(p["checkpoint_csv"], index=False, encoding="utf-8-sig", compression="gzip")
     with open(p["checkpoint_meta"], "w", encoding="utf-8") as f:
@@ -138,7 +133,6 @@ def load_checkpoint(job_id: str) -> Tuple[Optional[pd.DataFrame], Optional[Dict[
     if not (os.path.exists(p["checkpoint_csv"]) and os.path.exists(p["checkpoint_meta"])):
         return None, None
 
-    # Lê como string para não quebrar com colunas mistas (ex.: "Peso não encontrado")
     df = pd.read_csv(p["checkpoint_csv"], dtype=str, compression="gzip")
     df = df.astype(object).replace("nan", "").fillna("")
 
@@ -176,13 +170,20 @@ class SeleniumRuntime:
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
 
+        # ===== NOVAS OPÇÕES PARA EVITAR ERR_CONNECTION_RESET =====
+        chrome_options.add_argument("--ignore-certificate-errors")
+        chrome_options.add_argument("--ignore-ssl-errors")
+        chrome_options.add_argument("--disable-web-security")
+        chrome_options.add_argument("--allow-insecure-localhost")
+        # ========================================================
+
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option("useAutomationExtension", False)
 
         service = Service("/usr/bin/chromedriver")
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
-        self.driver.set_page_load_timeout(60)
+        self.driver.set_page_load_timeout(120)  # Aumentado de 60 para 120
         self.wait = WebDriverWait(self.driver, CFG.timeout)
 
     def stop(self):
@@ -210,7 +211,7 @@ def get_runtime() -> SeleniumRuntime:
 
 
 # =============================================================================
-# LOGIN / SESSION CHECKS
+# LOGIN / SESSION CHECKS (CORRIGIDO)
 # =============================================================================
 def is_logged_in(rt: SeleniumRuntime) -> bool:
     try:
@@ -226,37 +227,40 @@ def is_logged_in(rt: SeleniumRuntime) -> bool:
 
 
 def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -> bool:
+    """
+    Fluxo de login corrigido:
+    - Preenche usuário
+    - Preenche senha
+    - Clica no botão OK (submit)
+    """
     try:
         ui_log("Abrindo página de login...")
         rt.driver.get(CFG.url_login)
 
-        actions = ActionChains(rt.driver)
-
-        ui_log("Inserindo usuário...")
+        # 1. Campo Usuário
         id_user = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_TextBoxUsuario"
-        campo_user = rt.wait.until(EC.element_to_be_clickable((By.ID, id_user)))
-        actions.move_to_element(campo_user).click().perform()
+        campo_user = rt.wait.until(EC.visibility_of_element_located((By.ID, id_user)))
         campo_user.clear()
         campo_user.send_keys(usuario)
+        ui_log("Usuário preenchido.")
 
-        ui_log("Confirmando usuário (OK)...")
-        id_btn_ok = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk"
-        rt.driver.find_element(By.ID, id_btn_ok).click()
-
-        ui_log("Aguardando liberação do campo de senha...")
-        time.sleep(3)
-
-        ui_log("Inserindo senha e enviando (ENTER)...")
-        xpath_senha = "//input[@type='password']"
-        rt.wait.until(EC.visibility_of_element_located((By.XPATH, xpath_senha)))
-        campo_senha = rt.driver.find_element(By.XPATH, xpath_senha)
-        actions.move_to_element(campo_senha).click().perform()
+        # 2. Campo Senha
+        id_senha = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_TextBoxSenha"
+        campo_senha = rt.wait.until(EC.visibility_of_element_located((By.ID, id_senha)))
         campo_senha.clear()
         campo_senha.send_keys(senha)
-        time.sleep(1)
-        campo_senha.send_keys(Keys.RETURN)
+        ui_log("Senha preenchida.")
 
-        ui_log("Validando acesso (campo de consulta)...")
+        # 3. Botão OK (submit do formulário)
+        id_btn_ok = "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ButtonOk"
+        btn_ok = rt.wait.until(EC.element_to_be_clickable((By.ID, id_btn_ok)))
+        btn_ok.click()
+        ui_log("Botão OK clicado. Aguardando redirecionamento...")
+
+        # 4. Aguarda o redirecionamento e a página de consulta carregar
+        time.sleep(5)  # tempo extra para o sistema processar o login
+
+        # 5. Validação: presença do campo de consulta (indica login bem-sucedido)
         rt.wait.until(
             EC.presence_of_element_located(
                 (
@@ -266,7 +270,7 @@ def realizar_login(rt: SeleniumRuntime, usuario: str, senha: str, debug: bool) -
             )
         )
 
-        ui_log("Login confirmado.")
+        ui_log("Login confirmado com sucesso.")
         return True
 
     except Exception as e:
@@ -329,7 +333,6 @@ def processar_auto(rt: SeleniumRuntime, auto: str) -> Dict[str, Any]:
         encontrou = False
         for _ in range(3):
             try:
-                # >>> CORREÇÃO CRÍTICA: NÃO sobrescrever "driver"
                 btn = driver.find_element(
                     By.ID,
                     "ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_ContentPlaceHolderCorpo_btnPesquisar",
@@ -580,7 +583,6 @@ def rodar_lote(
 
         progress.progress(st.session_state.cursor / max(total, 1))
 
-        # checkpoint + parcial (blindado)
         if (st.session_state.cursor % checkpoint_every == 0) or (st.session_state.cursor == total):
             meta = {
                 "cursor": st.session_state.cursor,
